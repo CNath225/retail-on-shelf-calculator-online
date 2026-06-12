@@ -24,6 +24,6 @@ Chinese deployment notes are in `DEPLOYMENT_CN.md`.
 
 - Repsly raw export workbook with a `Submissions` sheet.
 - Range workbook with `TTL Store#`, `Range#`, and `Range%` columns.
-- Report template workbook, usually the same workbook as the range file.
+- Report template workbook with the final `Country`, `Category`, `Channel`, and `SKU` report layout.
 
 Uploaded files and generated reports are temporary runtime files.

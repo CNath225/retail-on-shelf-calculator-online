@@ -19,6 +19,7 @@ OUTPUT_ROOT = RUNTIME_DIR / "outputs"
 APP_TITLE = "Retail On-shelf Rate Calculator Online by CodeNATHAN"
 
 RANGE_SHEET_PREFERENCES = ["Master data", "Key SKU Display% (2)", "Key SKU Display%"]
+TEMPLATE_SHEET_PREFERENCES = ["ANZ On-Shelf Retailer", "ANZ On-Shelf Retailer (2)", "数据不含公式版"]
 MONTH_LABELS = {
     1: "JAN",
     2: "FEB",
@@ -91,6 +92,110 @@ def preferred_range_sheet(sheets: list[str]) -> str:
     return sheets[0] if sheets else "Master data"
 
 
+def normalize_headers(columns: list[object]) -> list[str]:
+    return [normalize_column_label(column) for column in columns]
+
+
+def sheet_columns(path: Optional[Path], sheet: str) -> list[object]:
+    if not path or not path.exists() or not sheet:
+        return []
+    try:
+        return list(pd.read_excel(path, sheet_name=sheet, nrows=0).columns)
+    except Exception:
+        return []
+
+
+def first_sheet_matching(path: Optional[Path], sheets: list[str], kind: str) -> str:
+    if not path or not path.exists():
+        return sheets[0] if sheets else ""
+
+    if kind == "range":
+        for preferred in RANGE_SHEET_PREFERENCES:
+            if preferred in sheets:
+                return preferred
+    if kind == "template":
+        for preferred in TEMPLATE_SHEET_PREFERENCES:
+            if preferred in sheets:
+                return preferred
+
+    best_sheet = sheets[0] if sheets else ""
+    best_score = -1
+    for sheet in sheets:
+        columns = sheet_columns(path, sheet)
+        score = sheet_score(columns, kind)
+        if score > best_score:
+            best_score = score
+            best_sheet = sheet
+    return best_sheet
+
+
+def sheet_score(columns: list[object], kind: str) -> int:
+    normalized = normalize_headers(columns)
+    normalized_set = set(normalized)
+
+    if kind == "raw":
+        score = 0
+        score += 4 if "ID" in normalized_set else 0
+        score += 3 if "PLACEID" in normalized_set else 0
+        score += 2 if "PLACE" in normalized_set else 0
+        score += 2 if "ACCOUNTNAME" in normalized_set else 0
+        return score
+
+    if kind == "range":
+        score = 0
+        for required in ["COUNTRY", "CATEGORY", "SKU", "ACCOUNT"]:
+            score += 2 if required in normalized_set else 0
+        score += 3 if "TTLSTORE" in normalized_set else 0
+        score += 2 * normalized.count("RANGE")
+        return score
+
+    if kind == "template":
+        score = 0
+        for required in ["COUNTRY", "CATEGORY", "CHANNEL", "SKU"]:
+            score += 3 if required in normalized_set else 0
+        score += sum(1 for column in columns if is_month_column(column))
+        return score
+
+    return 0
+
+
+def workbook_looks_like(path: Optional[Path], kind: str, sheet: Optional[str] = None) -> bool:
+    sheets = xlsx_sheets(path)
+    if not sheets:
+        return False
+    sheets_to_check = [sheet] if sheet else sheets
+    threshold = {"raw": 7, "range": 11, "template": 12}[kind]
+    return any(sheet_score(sheet_columns(path, one_sheet), kind) >= threshold for one_sheet in sheets_to_check)
+
+
+def month_label_from_month(month: str) -> str:
+    match = re.match(r"^20\d{2}-(0[1-9]|1[0-2])$", month)
+    if not match:
+        return st.session_state.get("month_label", "JUN")
+    return MONTH_LABELS[int(match.group(1))]
+
+
+def month_options() -> list[str]:
+    current_year = datetime.now().year
+    return [
+        f"{year}-{month_number:02d}"
+        for year in range(current_year - 1, current_year + 3)
+        for month_number in range(1, 13)
+    ]
+
+
+def base_month_label(column: object) -> str:
+    normalized = normalize_column_label(column)
+    for label in MONTH_LABELS.values():
+        if normalized.startswith(label):
+            return label
+    return ""
+
+
+def is_month_column(column: object) -> bool:
+    return bool(base_month_label(column))
+
+
 def infer_month_from_filename(filename: str) -> tuple[Optional[str], Optional[str]]:
     numeric_match = re.search(r"(20\d{2})[-_. /\\]?(0[1-9]|1[0-2])", filename)
     if numeric_match:
@@ -112,7 +217,11 @@ def infer_month_from_filename(filename: str) -> tuple[Optional[str], Optional[st
         year = year_month_match.group(1)
         month_name = year_month_match.group(2).upper()
     else:
-        return None, None
+        month_only_match = re.search(rf"\b({month_names})\b", filename, flags=re.IGNORECASE)
+        if not month_only_match:
+            return None, None
+        month_name = month_only_match.group(1).upper()
+        year = str(datetime.now().year)
 
     month_number = MONTH_NAME_TO_NUMBER[month_name]
     return f"{year}-{month_number:02d}", MONTH_LABELS[month_number]
@@ -196,10 +305,7 @@ def main() -> None:
     with st.sidebar:
         raw_file = st.file_uploader("Resply Raw Export", type=["xlsx"])
         range_file = st.file_uploader("Range Table", type=["xlsx"])
-        use_range_as_template = st.checkbox("Use range file as template", value=True)
-        template_file = None
-        if not use_range_as_template:
-            template_file = st.file_uploader("Report Template", type=["xlsx"])
+        template_file = st.file_uploader("Report Template", type=["xlsx"])
 
         if raw_file is not None:
             inferred_month, inferred_label = infer_month_from_filename(raw_file.name)
@@ -216,19 +322,21 @@ def main() -> None:
     session_upload_dir = UPLOAD_DIR / st.session_state["session_id"]
     raw_path = save_upload(raw_file, session_upload_dir) if raw_file else None
     range_path = save_upload(range_file, session_upload_dir) if range_file else None
-    template_path = range_path if use_range_as_template else save_upload(template_file, session_upload_dir)
+    template_path = save_upload(template_file, session_upload_dir) if template_file else None
 
     range_sheets = xlsx_sheets(range_path)
     template_sheets = xlsx_sheets(template_path)
     template_columns = []
+    range_default_sheet = first_sheet_matching(range_path, range_sheets, "range")
+    template_default_sheet = first_sheet_matching(template_path, template_sheets, "template")
 
     with st.sidebar:
         range_sheet = st.selectbox(
             "Range Sheet",
             range_sheets or ["Master data"],
             index=(
-                range_sheets.index(preferred_range_sheet(range_sheets))
-                if preferred_range_sheet(range_sheets) in range_sheets
+                range_sheets.index(range_default_sheet)
+                if range_default_sheet in range_sheets
                 else 0
             ),
         )
@@ -236,8 +344,8 @@ def main() -> None:
             "Template Sheet",
             template_sheets or ["ANZ On-Shelf Retailer"],
             index=(
-                template_sheets.index("ANZ On-Shelf Retailer")
-                if "ANZ On-Shelf Retailer" in template_sheets
+                template_sheets.index(template_default_sheet)
+                if template_default_sheet in template_sheets
                 else 0
             ),
         )
@@ -247,15 +355,54 @@ def main() -> None:
                 template_columns = list(pd.read_excel(template_path, sheet_name=template_sheet, nrows=0).columns)
             except Exception:
                 template_columns = []
-        preferred_column = choose_report_column(st.session_state["month_label"], template_columns)
-        if preferred_column:
-            st.session_state["month_label"] = preferred_column
 
-        month = st.text_input("Month", key="month")
-        month_label = st.text_input("Report Column", key="month_label")
-        previous_month_label = st.text_input("Compare To", key="previous_month_label")
+        month_values = month_options()
+        if st.session_state["month"] not in month_values:
+            month_values.insert(0, st.session_state["month"])
+        selected_month = st.selectbox(
+            "Month",
+            month_values,
+            index=month_values.index(st.session_state["month"]),
+        )
+        if selected_month != st.session_state["month"]:
+            st.session_state["month"] = selected_month
+            st.session_state["month_label"] = month_label_from_month(selected_month)
+            st.session_state["previous_month_label"] = previous_label(selected_month)
+
+        month = selected_month
+        generated_month_label = choose_report_column(month_label_from_month(month), template_columns)
+        month_label = str(generated_month_label or month_label_from_month(month))
+        st.session_state["month_label"] = month_label
+        st.text_input("Report Column", value=month_label, disabled=True)
+
+        default_compare = previous_label(month)
+        month_columns = [str(column) for column in template_columns if is_month_column(column)]
+        compare_options = [default_compare]
+        compare_options.extend(column for column in month_columns if column not in compare_options)
+        if st.session_state["previous_month_label"] not in compare_options:
+            st.session_state["previous_month_label"] = default_compare
+        previous_month_label = st.selectbox(
+            "Compare To",
+            compare_options,
+            index=compare_options.index(st.session_state["previous_month_label"]),
+        )
+        st.session_state["previous_month_label"] = previous_month_label
         keep_history_columns = st.checkbox("Keep history columns", value=False)
         st.button("Clear Session Files", on_click=clear_session_files)
+
+    validation_errors = []
+    if raw_path and not workbook_looks_like(raw_path, "raw"):
+        validation_errors.append(
+            "Raw Export file looks wrong. Upload the Repsly raw export here; it should contain ID and Place ID columns."
+        )
+    if range_path and not workbook_looks_like(range_path, "range", range_sheet):
+        validation_errors.append(
+            "Range Table file/sheet looks wrong. Upload the workbook sheet with Country, Category, SKU, Account, TTL Store#, and Range#."
+        )
+    if template_path and not workbook_looks_like(template_path, "template", template_sheet):
+        validation_errors.append(
+            "Report Template file/sheet looks wrong. Upload the final report template sheet with Country, Category, Channel, and SKU."
+        )
 
     st.subheader("Inputs")
     st.write(
@@ -265,15 +412,19 @@ def main() -> None:
             "previous_month_label": previous_month_label,
             "raw_file": raw_file.name if raw_file else "",
             "range_file": range_file.name if range_file else "",
-            "template_file": (range_file.name if use_range_as_template and range_file else template_file.name if template_file else ""),
+            "template_file": template_file.name if template_file else "",
             "range_sheet": range_sheet,
             "template_sheet": template_sheet,
         }
     )
 
-    ready = all([month, month_label, previous_month_label, raw_path, range_path, template_path])
+    if validation_errors:
+        for error in validation_errors:
+            st.error(error)
+
+    ready = all([month, month_label, previous_month_label, raw_path, range_path, template_path]) and not validation_errors
     if not ready:
-        st.info("Upload the raw export and range/template workbook.")
+        st.info("Upload Raw Export, Range Table, and Report Template workbooks.")
         return
 
     if st.button("Generate Report", type="primary"):

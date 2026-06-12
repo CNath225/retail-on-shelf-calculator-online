@@ -108,12 +108,41 @@ def find_raw_column(raw_df: pd.DataFrame, candidates: list[str]) -> Optional[str
     return None
 
 
+def normalize_header(value: object) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+
+def find_raw_submission_sheet(raw_file: Path) -> str:
+    workbook = pd.ExcelFile(raw_file)
+    sheet_names = workbook.sheet_names
+    ordered_sheets = []
+    if "Submissions" in sheet_names:
+        ordered_sheets.append("Submissions")
+    ordered_sheets.extend(sheet for sheet in sheet_names if sheet not in ordered_sheets)
+
+    for sheet_name in ordered_sheets:
+        preview = pd.read_excel(raw_file, sheet_name=sheet_name, nrows=10)
+        normalized_columns = {normalize_header(column) for column in preview.columns}
+        has_id = "ID" in normalized_columns
+        has_place = "PLACEID" in normalized_columns or "PLACE" in normalized_columns
+        if has_id and has_place:
+            return sheet_name
+
+    raise SystemExit(
+        "Could not find a Repsly raw submissions sheet. "
+        "Expected a sheet named Submissions, or any sheet with ID and Place ID columns. "
+        f"Found sheets: {', '.join(sheet_names)}"
+    )
+
+
 def read_raw_submissions(
     raw_file: Path,
     month: str,
     account_name_to_code: dict[str, str],
 ) -> pd.DataFrame:
-    raw_df = pd.read_excel(raw_file, sheet_name="Submissions")
+    raw_sheet = find_raw_submission_sheet(raw_file)
+    raw_df = pd.read_excel(raw_file, sheet_name=raw_sheet)
+    raw_df.attrs["source_sheet"] = raw_sheet
 
     # Keep only real submissions. Excel sometimes has formatted empty rows.
     raw_df = raw_df[raw_df["ID"].notna()].copy()
@@ -294,6 +323,7 @@ def print_summary(
 
     print("Step 1: Prepare raw Resply data")
     print(f"Input file: {raw_file}")
+    print(f"Input sheet: {raw_df.attrs.get('source_sheet', 'Submissions')}")
     print(f"Month: {display_long['month'].iloc[0]}")
     print(f"Raw submission rows: {len(raw_df)}")
     print(f"Clean display rows: {len(display_long)}")

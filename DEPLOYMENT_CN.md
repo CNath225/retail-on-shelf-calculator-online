@@ -48,8 +48,8 @@ runtime.txt
 ## 线上使用方法
 
 1. 上传 Repsly raw export。
-2. 上传 Range / Template workbook。
-3. 如果 range workbook 和 report template 是同一个文件，保持 `Use range file as template` 勾选。
+2. 上传 Range workbook。
+3. 上传 Report Template workbook。
 4. 检查 Month、Report Column、Compare To。
 5. 点击 Generate Report。
 6. 下载生成的 Excel。

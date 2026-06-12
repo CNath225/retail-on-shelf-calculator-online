@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--range-file",
         default=str(DEFAULT_RANGE_FILE),
-        help="Workbook containing TTL Store#/Range#/Range%.",
+        help="Workbook containing TTL Store#/Range#/Range%%.",
     )
     parser.add_argument(
         "--range-sheet",
