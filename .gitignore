@@ -1,0 +1,8 @@
+.venv/
+.runtime/
+__pycache__/
+*.pyc
+*.duckdb
+*.xlsx
+*.csv
+.DS_Store
