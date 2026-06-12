@@ -50,6 +50,23 @@ def is_month_column(column: object) -> bool:
     return bool(base_month_label(column))
 
 
+def canonical_month_label(value: object) -> str:
+    return base_month_label(value) or str(value).strip().upper()
+
+
+def align_month_column(frame: pd.DataFrame, requested_label: str) -> tuple[pd.DataFrame, str]:
+    label = canonical_month_label(requested_label)
+    if label in frame.columns:
+        return frame, label
+
+    wanted = normalize_column_label(label)
+    for column in frame.columns:
+        if normalize_column_label(column) == wanted:
+            return frame.rename(columns={column: label}), label
+
+    return frame, label
+
+
 def is_number(value: Any) -> bool:
     return pd.notna(pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0])
 
@@ -327,15 +344,18 @@ def main() -> None:
     }
 
     output_df = report_df.copy()
-    if args.month_label in output_df.columns:
-        output_df[args.month_label] = ""
+    output_df, month_label = align_month_column(output_df, args.month_label)
+    output_df, previous_month_label = align_month_column(output_df, args.previous_month_label)
+
+    if month_label in output_df.columns:
+        output_df[month_label] = ""
     else:
         insert_at = (
             output_df.columns.get_loc("Trend")
             if "Trend" in output_df.columns
             else len(output_df.columns)
         )
-        output_df.insert(insert_at, args.month_label, "")
+        output_df.insert(insert_at, month_label, "")
 
     for index, row in output_df.iterrows():
         sku = row.get("SKU", "")
@@ -348,7 +368,7 @@ def main() -> None:
             normalize_key(row.get("Channel", "")),
             normalize_key(sku),
         )
-        output_df.at[index, args.month_label] = rate_lookup.get(lookup_key, "")
+        output_df.at[index, month_label] = rate_lookup.get(lookup_key, "")
 
     # Calculate TTL rows as the average of numeric rows in the same Country + Category + Channel block.
     group_columns = ["Country", "Category", "Channel"]
@@ -358,14 +378,14 @@ def main() -> None:
             continue
 
         detail_values = output_df.loc[
-            group.index.difference(ttl_index), args.month_label
+            group.index.difference(ttl_index), month_label
         ].apply(lambda value: as_number(value) if is_number(value) else pd.NA)
         numeric_values = detail_values.dropna()
 
         if len(numeric_values) > 0:
-            output_df.loc[ttl_index, args.month_label] = float(numeric_values.mean())
+            output_df.loc[ttl_index, month_label] = float(numeric_values.mean())
         else:
-            output_df.loc[ttl_index, args.month_label] = ""
+            output_df.loc[ttl_index, month_label] = ""
 
     # Calculate category-level TTL rows where Channel is blank.
     category_ttl_mask = (
@@ -379,22 +399,22 @@ def main() -> None:
             & output_df["SKU"].apply(normalize_key).eq("TTL")
             & output_df["Channel"].notna()
         )
-        child_values = output_df.loc[child_ttl_mask, args.month_label].apply(
+        child_values = output_df.loc[child_ttl_mask, month_label].apply(
             lambda value: as_number(value) if is_number(value) else pd.NA
         )
         numeric_child_values = child_values.dropna()
         if len(numeric_child_values) > 0:
-            output_df.at[ttl_index, args.month_label] = float(numeric_child_values.mean())
+            output_df.at[ttl_index, month_label] = float(numeric_child_values.mean())
 
-    trend_column = "Trend" if "Trend" in output_df.columns else f"Trend vs {args.previous_month_label}"
+    trend_column = "Trend" if "Trend" in output_df.columns else f"Trend vs {previous_month_label}"
     output_df[trend_column] = output_df.apply(
-        lambda row: trend_value(row[args.month_label], row.get(args.previous_month_label, "")),
+        lambda row: trend_value(row[month_label], row.get(previous_month_label, "")),
         axis=1,
     )
     output_df = clean_report_columns(
         output_df=output_df,
-        month_label=args.month_label,
-        previous_month_label=args.previous_month_label,
+        month_label=month_label,
+        previous_month_label=previous_month_label,
         trend_column=trend_column,
         keep_history_columns=args.keep_history_columns,
     ).reset_index(drop=True)
@@ -437,16 +457,16 @@ def main() -> None:
                 worksheet.write(0, col_idx, column_name, header_format)
 
         report_sheet = writer.sheets["Report Preview"]
-        month_col = output_df.columns.get_loc(args.month_label)
+        month_col = output_df.columns.get_loc(month_label)
         report_sheet.set_column(month_col, month_col, 12, percent_format)
 
-        if args.previous_month_label in output_df.columns:
-            previous_col = output_df.columns.get_loc(args.previous_month_label)
+        if previous_month_label in output_df.columns:
+            previous_col = output_df.columns.get_loc(previous_month_label)
             report_sheet.set_column(previous_col, previous_col, 12, percent_format)
 
         formula_columns = [
             column
-            for column in [args.previous_month_label, args.month_label]
+            for column in [previous_month_label, month_label]
             if column in output_df.columns
         ]
         ttl_formula_count = write_ttl_average_formulas(
@@ -475,7 +495,7 @@ def main() -> None:
             },
         )
 
-    matched = output_df[args.month_label].ne("").sum()
+    matched = output_df[month_label].ne("").sum()
     ttl_rows = output_df["SKU"].apply(normalize_key).eq("TTL").sum()
     template_countries = sorted(
         output_df["Country"].dropna().astype(str).str.strip().unique().tolist()
@@ -491,7 +511,7 @@ def main() -> None:
     print(f"Template: {args.template_file} / {args.template_sheet}")
     print(f"Step 3 result: {step3_file}")
     print(f"Report rows: {len(output_df)}")
-    print(f"Rows filled for {args.month_label}: {matched}")
+    print(f"Rows filled for {month_label}: {matched}")
     print(f"TTL rows recalculated: {ttl_rows}")
     print(f"TTL Excel formulas written: {ttl_formula_count}")
     print(f"Template countries: {template_countries}")
@@ -503,7 +523,7 @@ def main() -> None:
     print("First 20 report rows:")
     preview_columns = [
         column
-        for column in ["Country", "Category", "Channel", "SKU", args.previous_month_label, args.month_label, trend_column]
+        for column in ["Country", "Category", "Channel", "SKU", previous_month_label, month_label, trend_column]
         if column in output_df.columns
     ]
     print(output_df[preview_columns].head(20).to_string(index=False))

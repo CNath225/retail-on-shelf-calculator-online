@@ -34,6 +34,7 @@ MONTH_LABELS = {
     11: "NOV",
     12: "DEC",
 }
+ALL_MONTH_LABELS = list(MONTH_LABELS.values())
 MONTH_NAME_TO_NUMBER = {
     "JAN": 1,
     "JANUARY": 1,
@@ -230,10 +231,10 @@ def infer_month_from_filename(filename: str) -> tuple[Optional[str], Optional[st
 def previous_label(month: str) -> str:
     match = re.match(r"^(20\d{2})-(0[1-9]|1[0-2])$", month)
     if not match:
-        return st.session_state.get("previous_month_label", "May")
+        return st.session_state.get("previous_month_label", "MAY")
     month_number = int(match.group(2))
     previous_number = 12 if month_number == 1 else month_number - 1
-    return MONTH_LABELS[previous_number].title()
+    return MONTH_LABELS[previous_number]
 
 
 def normalize_column_label(value: object) -> str:
@@ -246,8 +247,50 @@ def choose_report_column(month_label: Optional[str], template_columns: list[str]
     wanted = normalize_column_label(month_label)
     for column in template_columns:
         if normalize_column_label(column) == wanted:
-            return str(column)
+            return base_month_label(column) or str(column).upper()
     return month_label
+
+
+def month_select_index(value: str, fallback: str) -> int:
+    normalized = base_month_label(value) or base_month_label(fallback) or "JUN"
+    return ALL_MONTH_LABELS.index(normalized) if normalized in ALL_MONTH_LABELS else 5
+
+
+def render_app_title() -> None:
+    st.markdown(
+        """
+        <style>
+          .app-title {
+            margin: 0.25rem 0 1.5rem;
+            font-size: clamp(2.1rem, 4vw, 3.5rem);
+            font-weight: 800;
+            line-height: 1.08;
+            color: #f4f5f7;
+          }
+          .code-nathan {
+            display: inline-block;
+            color: transparent;
+            background: linear-gradient(100deg, #a98235 0%, #7c682f 35%, #b7bbc2 65%, #24272d 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            text-shadow: 0 0 12px rgba(169, 130, 53, 0.35), 0 0 2px rgba(255, 255, 255, 0.25);
+            animation: codeJump 1.25s steps(2, end) infinite;
+          }
+          @keyframes codeJump {
+            0%, 100% { transform: translateY(0); filter: brightness(1); }
+            28% { transform: translateY(-1px); filter: brightness(1.25); }
+            32% { transform: translateY(1px); filter: brightness(0.9); }
+            48% { transform: translateY(0); filter: brightness(1.1); }
+            52% { transform: translateY(-2px); filter: brightness(1.35); }
+          }
+          @media (prefers-reduced-motion: reduce) {
+            .code-nathan { animation: none; }
+          }
+        </style>
+        <div class="app-title">Retail On-shelf Rate Calculator Online by <span class="code-nathan">CodeNATHAN</span></div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def run_command(command: list[str], output_root: Path, history_db: Path) -> subprocess.CompletedProcess:
@@ -281,7 +324,7 @@ def init_state() -> None:
     st.session_state.setdefault("session_id", uuid.uuid4().hex)
     st.session_state.setdefault("month", "2026-06")
     st.session_state.setdefault("month_label", "JUN")
-    st.session_state.setdefault("previous_month_label", "May")
+    st.session_state.setdefault("previous_month_label", "MAY")
     st.session_state.setdefault("_last_raw_filename", "")
     st.session_state.setdefault("last_report_state", None)
     st.session_state.setdefault("last_run_log", "")
@@ -300,7 +343,7 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     init_state()
 
-    st.title(APP_TITLE)
+    render_app_title()
 
     with st.sidebar:
         raw_file = st.file_uploader("Resply Raw Export", type=["xlsx"])
@@ -370,21 +413,22 @@ def main() -> None:
             st.session_state["previous_month_label"] = previous_label(selected_month)
 
         month = selected_month
-        generated_month_label = choose_report_column(month_label_from_month(month), template_columns)
-        month_label = str(generated_month_label or month_label_from_month(month))
+        month_label = st.selectbox(
+            "Report Column",
+            ALL_MONTH_LABELS,
+            index=month_select_index(st.session_state["month_label"], month_label_from_month(month)),
+        )
         st.session_state["month_label"] = month_label
-        st.text_input("Report Column", value=month_label, disabled=True)
 
         default_compare = previous_label(month)
-        month_columns = [str(column) for column in template_columns if is_month_column(column)]
-        compare_options = [default_compare]
-        compare_options.extend(column for column in month_columns if column not in compare_options)
-        if st.session_state["previous_month_label"] not in compare_options:
+        compare_options = ALL_MONTH_LABELS.copy()
+        previous_state_label = base_month_label(st.session_state["previous_month_label"]) or default_compare
+        if previous_state_label not in compare_options:
             st.session_state["previous_month_label"] = default_compare
         previous_month_label = st.selectbox(
             "Compare To",
             compare_options,
-            index=compare_options.index(st.session_state["previous_month_label"]),
+            index=month_select_index(previous_state_label, default_compare),
         )
         st.session_state["previous_month_label"] = previous_month_label
         keep_history_columns = st.checkbox("Keep history columns", value=False)
@@ -393,7 +437,7 @@ def main() -> None:
     validation_errors = []
     if raw_path and not workbook_looks_like(raw_path, "raw"):
         validation_errors.append(
-            "Raw Export file looks wrong. Upload the Repsly raw export here; it should contain ID and Place ID columns."
+            "Raw Export file looks wrong. Upload the Repsly raw export here; it should contain Place ID plus ID or Date and time columns."
         )
     if range_path and not workbook_looks_like(range_path, "range", range_sheet):
         validation_errors.append(

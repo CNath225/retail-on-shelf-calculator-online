@@ -118,21 +118,61 @@ def find_raw_submission_sheet(raw_file: Path) -> str:
     ordered_sheets = []
     if "Submissions" in sheet_names:
         ordered_sheets.append("Submissions")
+    if "Submission" in sheet_names:
+        ordered_sheets.append("Submission")
     ordered_sheets.extend(sheet for sheet in sheet_names if sheet not in ordered_sheets)
 
     for sheet_name in ordered_sheets:
         preview = pd.read_excel(raw_file, sheet_name=sheet_name, nrows=10)
         normalized_columns = {normalize_header(column) for column in preview.columns}
         has_id = "ID" in normalized_columns
+        has_submission_date = "DATEANDTIME" in normalized_columns or "DATE" in normalized_columns
         has_place = "PLACEID" in normalized_columns or "PLACE" in normalized_columns
-        if has_id and has_place:
+        normalized_sheet = normalize_header(sheet_name)
+        likely_submission_sheet = normalized_sheet in {"SUBMISSION", "SUBMISSIONS"}
+        if has_place and (has_id or has_submission_date or likely_submission_sheet):
             return sheet_name
 
     raise SystemExit(
         "Could not find a Repsly raw submissions sheet. "
-        "Expected a sheet named Submissions, or any sheet with ID and Place ID columns. "
+        "Expected a sheet named Submissions/Submission, or any sheet with Place ID plus ID or Date and time columns. "
         f"Found sheets: {', '.join(sheet_names)}"
     )
+
+
+def normalize_raw_submission_columns(raw_df: pd.DataFrame) -> pd.DataFrame:
+    raw_df = raw_df.copy()
+
+    column_aliases = {
+        "ID": ["ID", "Submission ID"],
+        "Place ID": ["Place ID", "PlaceID"],
+        "Date and time": ["Date and time", "Date", "Submitted at"],
+    }
+    for target, candidates in column_aliases.items():
+        if target in raw_df.columns:
+            continue
+        source = find_raw_column(raw_df, candidates)
+        if source is not None:
+            raw_df = raw_df.rename(columns={source: target})
+
+    if "Place ID" not in raw_df.columns:
+        raise ValueError("Raw file is missing Place ID, so submissions cannot be matched to stores.")
+
+    if "ID" not in raw_df.columns:
+        date_values = (
+            raw_df["Date and time"].fillna("").tolist()
+            if "Date and time" in raw_df.columns
+            else [""] * len(raw_df)
+        )
+        raw_df["ID"] = [
+            f"{place_id}|{date_value}|{row_number}"
+            for row_number, (place_id, date_value) in enumerate(
+                zip(raw_df["Place ID"].fillna(""), date_values),
+                start=1,
+            )
+        ]
+
+    return raw_df
 
 
 def read_raw_submissions(
@@ -142,10 +182,11 @@ def read_raw_submissions(
 ) -> pd.DataFrame:
     raw_sheet = find_raw_submission_sheet(raw_file)
     raw_df = pd.read_excel(raw_file, sheet_name=raw_sheet)
+    raw_df = normalize_raw_submission_columns(raw_df)
     raw_df.attrs["source_sheet"] = raw_sheet
 
     # Keep only real submissions. Excel sometimes has formatted empty rows.
-    raw_df = raw_df[raw_df["ID"].notna()].copy()
+    raw_df = raw_df[raw_df["Place ID"].notna()].copy()
 
     raw_df["Month Clean"] = month
     raw_df["Country Clean"] = raw_df["Country"] if "Country" in raw_df.columns else "AU"
