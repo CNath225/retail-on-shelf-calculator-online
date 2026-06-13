@@ -6,7 +6,9 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from step4_generate_report_preview import (
+    apply_presentation_formatting,
     apply_report_preview_formatting,
+    build_presentation_frame,
     clean_report_columns,
     style_report_preview,
     write_ttl_average_formulas,
@@ -101,6 +103,61 @@ class ReportFormattingTests(unittest.TestCase):
             list(cleaned.columns),
             ["Country", "Category", "Channel", "SKU", "JUN", "JUL", "Trend", "New", "Note"],
         )
+
+    def test_presentation_frame_copies_ttl_values_only(self):
+        frame = build_frame()
+        presentation = build_presentation_frame(frame, "MAY", "JUN", "Trend")
+
+        self.assertEqual(
+            list(presentation.columns),
+            ["Country", "Category", "Channel", "MAY", "JUN", "Trend", "Key Points"],
+        )
+        self.assertEqual(len(presentation), 2)
+        self.assertEqual(presentation["Key Points"].tolist(), ["", ""])
+        self.assertNotIn("SKU", presentation.columns)
+        self.assertEqual(presentation.loc[0, "Channel"], "HN")
+        self.assertEqual(presentation.loc[0, "JUN"], "")
+        self.assertEqual(presentation.loc[1, "Channel"], "")
+        self.assertEqual(presentation.loc[1, "Trend"], "▼")
+
+    def test_presentation_sheet_is_values_and_formatted(self):
+        frame = pd.DataFrame(
+            [
+                {"Country": "AU", "Category": "W&D", "Channel": "HN", "MAY": 0.62, "JUN": 0.95, "Trend": "▲", "Key Points": ""},
+                {"Country": "AU", "Category": "W&D", "Channel": "", "MAY": 0.41, "JUN": 0.53, "Trend": "▼", "Key Points": ""},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "presentation.xlsx"
+            with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+                frame.to_excel(writer, sheet_name="For Presentation", index=False)
+                wb = writer.book
+                green = wb.add_format({"bg_color": "#C6EFCE", "font_color": "#006100"})
+                red = wb.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
+                cat_text = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True})
+                cat_pct = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
+                ch_text = wb.add_format({"bg_color": "#A6CAEC", "bold": True})
+                ch_pct = wb.add_format({"bg_color": "#A6CAEC", "bold": True, "num_format": "0%"})
+                apply_presentation_formatting(
+                    writer.sheets["For Presentation"],
+                    frame,
+                    "MAY",
+                    "JUN",
+                    "Trend",
+                    green,
+                    red,
+                    cat_text,
+                    cat_pct,
+                    ch_text,
+                    ch_pct,
+                )
+
+            ws = load_workbook(path, data_only=False)["For Presentation"]
+            self.assertEqual(ws.cell(row=2, column=1).fill.fgColor.rgb, "FFA6CAEC")
+            self.assertEqual(ws.cell(row=3, column=1).fill.fgColor.rgb, "FF0070C0")
+            self.assertEqual(ws.cell(row=3, column=7).value, None)
+            self.assertFalse(str(ws.cell(row=2, column=5).value).startswith("="))
+            self.assertGreaterEqual(len(list(ws.conditional_formatting)), 2)
 
 
 if __name__ == "__main__":

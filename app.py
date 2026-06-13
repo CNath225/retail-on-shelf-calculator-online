@@ -529,13 +529,24 @@ def render_report(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         on_click="ignore",
     )
-    tabs = ["Preview", "Rate Detail", "Display Counts"]
-    if identifier_quality_csv and identifier_quality_csv.exists():
+    has_presentation_sheet = "For Presentation" in xlsx_sheets(final_report)
+    tabs = (
+        ["Preview", "For Presentation", "Rate Detail", "Display Counts"]
+        if has_presentation_sheet
+        else ["Preview", "Rate Detail", "Display Counts"]
+    )
+    has_identifier_quality = bool(identifier_quality_csv and identifier_quality_csv.exists())
+    if has_identifier_quality:
         tabs.append("Identifier Quality")
     rendered_tabs = st.tabs(tabs)
     preview_tab = rendered_tabs[0]
-    detail_tab = rendered_tabs[1]
-    count_tab = rendered_tabs[2]
+    next_tab_index = 1
+    presentation_tab = rendered_tabs[next_tab_index] if has_presentation_sheet else None
+    if has_presentation_sheet:
+        next_tab_index += 1
+    detail_tab = rendered_tabs[next_tab_index]
+    count_tab = rendered_tabs[next_tab_index + 1]
+    identifier_tab = rendered_tabs[next_tab_index + 2] if has_identifier_quality else None
     with preview_tab:
         from step4_generate_report_preview import style_report_preview
 
@@ -549,14 +560,28 @@ def render_report(
             )
         except Exception:
             st.dataframe(preview_df, use_container_width=True, height=520)
+    if presentation_tab is not None:
+        with presentation_tab:
+            from step4_generate_report_preview import style_presentation_frame
+
+            presentation_df = pd.read_excel(final_report, sheet_name="For Presentation")
+            month_label = st.session_state.get("month_label", "JUN")
+            try:
+                st.dataframe(
+                    style_presentation_frame(presentation_df, month_label),
+                    use_container_width=True,
+                    height=520,
+                )
+            except Exception:
+                st.dataframe(presentation_df, use_container_width=True, height=520)
     with detail_tab:
         if step3_csv.exists():
             st.dataframe(pd.read_csv(step3_csv), use_container_width=True, height=520)
     with count_tab:
         if count_csv.exists():
             st.dataframe(pd.read_csv(count_csv), use_container_width=True, height=520)
-    if identifier_quality_csv and identifier_quality_csv.exists() and len(rendered_tabs) > 3:
-        with rendered_tabs[3]:
+    if identifier_tab is not None:
+        with identifier_tab:
             st.dataframe(pd.read_csv(identifier_quality_csv), use_container_width=True, height=520)
 
 

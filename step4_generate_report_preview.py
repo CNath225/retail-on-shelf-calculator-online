@@ -28,6 +28,7 @@ MONTH_LABELS = {
     11: "NOV",
     12: "DEC",
 }
+PRESENTATION_SHEET_NAME = "For Presentation"
 
 
 def normalize_key(value: Any) -> str:
@@ -187,6 +188,26 @@ def clean_report_columns(
     ]
     extras = [column for column in selected_columns if column not in ordered]
     return cleaned[ordered + extras]
+
+
+def build_presentation_frame(
+    report_frame: pd.DataFrame,
+    previous_month_label: str,
+    month_label: str,
+    trend_column: str,
+) -> pd.DataFrame:
+    ttl_rows = report_frame[report_frame["SKU"].apply(normalize_key).eq("TTL")].copy()
+    presentation = ttl_rows[
+        ["Country", "Category", "Channel", previous_month_label, month_label, trend_column]
+    ].copy()
+    presentation["Channel"] = presentation["Channel"].apply(
+        lambda value: "" if is_blank(value) else value
+    )
+    presentation = presentation.rename(columns={trend_column: "Trend"})
+    presentation["Key Points"] = ""
+    return presentation[
+        ["Country", "Category", "Channel", previous_month_label, month_label, "Trend", "Key Points"]
+    ].reset_index(drop=True)
 
 
 def is_blank(value: Any) -> bool:
@@ -471,6 +492,79 @@ def apply_report_preview_formatting(
             worksheet.write(position + 1, col_index, value, text_format)
 
 
+def apply_presentation_formatting(
+    worksheet,
+    frame: pd.DataFrame,
+    previous_month_label: str,
+    month_label: str,
+    trend_column: str,
+    green_format,
+    red_format,
+    category_text_format,
+    category_pct_format,
+    channel_text_format,
+    channel_pct_format,
+) -> None:
+    if frame.empty:
+        return
+
+    columns = list(frame.columns)
+    channel_index = columns.index("Channel")
+    month_columns = [previous_month_label, month_label]
+    for position, row in frame.iterrows():
+        channel_blank = is_blank(row.get("Channel", ""))
+        text_format = category_text_format if channel_blank else channel_text_format
+        pct_format = category_pct_format if channel_blank else channel_pct_format
+        for col_index, column in enumerate(columns):
+            value = row[column]
+            if pd.isna(value):
+                value = ""
+            cell_format = pct_format if column in month_columns else text_format
+            worksheet.write(position + 1, col_index, value, cell_format)
+
+    first_row = 2
+    last_row = len(frame) + 1
+    channel_letter = xl_col_to_name(channel_index)
+    if month_label in columns:
+        month_index = columns.index(month_label)
+        month_letter = xl_col_to_name(month_index)
+        month_range = f"{month_letter}{first_row}:{month_letter}{last_row}"
+        cell = f"${month_letter}{first_row}"
+        channel_not_blank = f'${channel_letter}{first_row}<>""'
+        worksheet.conditional_format(
+            month_range,
+            {
+                "type": "formula",
+                "criteria": f"=AND({channel_not_blank},ISNUMBER({cell}),{cell}<0.6)",
+                "format": red_format,
+            },
+        )
+        trend_clause = ""
+        if trend_column in columns:
+            trend_letter = xl_col_to_name(columns.index(trend_column))
+            trend_clause = f',${trend_letter}{first_row}<>"▼"'
+        worksheet.conditional_format(
+            month_range,
+            {
+                "type": "formula",
+                "criteria": f"=AND({channel_not_blank},ISNUMBER({cell}),{cell}>0.9{trend_clause})",
+                "format": green_format,
+            },
+        )
+
+    if trend_column in columns:
+        trend_letter = xl_col_to_name(columns.index(trend_column))
+        trend_range = f"{trend_letter}{first_row}:{trend_letter}{last_row}"
+        worksheet.conditional_format(
+            trend_range,
+            {
+                "type": "formula",
+                "criteria": f'=AND(${channel_letter}{first_row}<>"",${trend_letter}{first_row}="▼")',
+                "format": red_format,
+            },
+        )
+
+
 def style_report_preview(frame: pd.DataFrame, month_label: str, trend_column: str = "Trend"):
     """Pandas Styler that mirrors the Excel report colours for the web preview."""
     green = "background-color: #C6EFCE; color: #006100"
@@ -483,6 +577,32 @@ def style_report_preview(frame: pd.DataFrame, month_label: str, trend_column: st
         if normalize_key(row.get("SKU", "")) == "TTL":
             fill = category if is_blank(row.get("Channel", "")) else channel
             return [fill for _ in row]
+        position = {column: index for index, column in enumerate(row.index)}
+        if month_label in position and is_number(row[month_label]):
+            number = as_number(row[month_label])
+            trend = str(row.get(trend_column, "")).strip()
+            if number > 0.9 and trend != "▼":
+                styles[position[month_label]] = green
+            elif number < 0.6:
+                styles[position[month_label]] = red
+        if trend_column in position and str(row.get(trend_column, "")).strip() == "▼":
+            styles[position[trend_column]] = red
+        return styles
+
+    return frame.style.apply(style_row, axis=1)
+
+
+def style_presentation_frame(frame: pd.DataFrame, month_label: str, trend_column: str = "Trend"):
+    """Pandas Styler for the For Presentation sheet preview."""
+    green = "background-color: #C6EFCE; color: #006100"
+    red = "background-color: #FFC7CE; color: #9C0006"
+    category = "background-color: #0070C0; color: #FFFFFF; font-weight: 700"
+    channel = "background-color: #A6CAEC; color: #1F2328; font-weight: 700"
+
+    def style_row(row: pd.Series) -> list[str]:
+        styles = [channel for _ in row]
+        if is_blank(row.get("Channel", "")):
+            return [category for _ in row]
         position = {column: index for index, column in enumerate(row.index)}
         if month_label in position and is_number(row[month_label]):
             number = as_number(row[month_label])
@@ -621,6 +741,12 @@ def main() -> None:
         trend_column=trend_column,
         keep_history_columns=args.keep_history_columns,
     ).reset_index(drop=True)
+    presentation_df = build_presentation_frame(
+        output_df,
+        previous_month_label=previous_month_label,
+        month_label=month_label,
+        trend_column=trend_column,
+    )
 
     key_sku_columns = [
         "country",
@@ -641,6 +767,7 @@ def main() -> None:
     with pd.ExcelWriter(output_xlsx, engine="xlsxwriter") as writer:
         output_df.to_excel(writer, sheet_name="Report Preview", index=False)
         key_sku_df.to_excel(writer, sheet_name="Key SKU Display", index=False)
+        presentation_df.to_excel(writer, sheet_name=PRESENTATION_SHEET_NAME, index=False)
 
         workbook = writer.book
         write_alias_sheet_xlsxwriter(workbook, alias_decisions)
@@ -659,12 +786,16 @@ def main() -> None:
         for sheet_name, df in {
             "Report Preview": output_df,
             "Key SKU Display": key_sku_df,
+            PRESENTATION_SHEET_NAME: presentation_df,
         }.items():
             worksheet = writer.sheets[sheet_name]
             worksheet.freeze_panes(1, 0)
             worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
             for col_idx, column_name in enumerate(df.columns):
-                width = min(max(len(str(column_name)) + 2, 12), 28)
+                if sheet_name == PRESENTATION_SHEET_NAME and column_name == "Key Points":
+                    width = 28
+                else:
+                    width = min(max(len(str(column_name)) + 2, 12), 28)
                 worksheet.set_column(col_idx, col_idx, width)
                 worksheet.write(0, col_idx, column_name, header_format)
 
@@ -702,6 +833,25 @@ def main() -> None:
             channel_text_format=channel_text_format,
         )
 
+        presentation_sheet = writer.sheets[PRESENTATION_SHEET_NAME]
+        for col_name in [previous_month_label, month_label]:
+            if col_name in presentation_df.columns:
+                col_idx = presentation_df.columns.get_loc(col_name)
+                presentation_sheet.set_column(col_idx, col_idx, 12, percent_format)
+        apply_presentation_formatting(
+            worksheet=presentation_sheet,
+            frame=presentation_df,
+            previous_month_label=previous_month_label,
+            month_label=month_label,
+            trend_column="Trend",
+            green_format=green_value_format,
+            red_format=red_value_format,
+            category_text_format=category_text_format,
+            category_pct_format=category_pct_format,
+            channel_text_format=channel_text_format,
+            channel_pct_format=channel_pct_format,
+        )
+
         key_sheet = writer.sheets["Key SKU Display"]
         for col_name in ["range_percent", "final_on_shelf_rate"]:
             col_idx = key_sku_df.columns.get_loc(col_name)
@@ -723,6 +873,7 @@ def main() -> None:
 
     matched = output_df[month_label].ne("").sum()
     ttl_rows = output_df["SKU"].apply(normalize_key).eq("TTL").sum()
+    presentation_rows = len(presentation_df)
     template_countries = sorted(
         output_df["Country"].dropna().astype(str).str.strip().unique().tolist()
     )
@@ -740,6 +891,7 @@ def main() -> None:
     print(f"Rows filled for {month_label}: {matched}")
     print(f"TTL rows recalculated: {ttl_rows}")
     print(f"TTL Excel formulas written: {ttl_formula_count}")
+    print(f"For Presentation rows: {presentation_rows}")
     print(f"Template countries: {template_countries}")
     print(f"Rate table countries: {rate_countries}")
     print(f"History columns kept: {args.keep_history_columns}")
