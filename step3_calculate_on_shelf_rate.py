@@ -190,6 +190,10 @@ def main() -> None:
         lambda row: rate_status(row["visited_rows"], row["range_percent"], row["range_store_count"]),
         axis=1,
     )
+    range_missing_mask = merged["rate_status"].eq("range missing")
+    rate_columns = ["visit_based_rate", "store_based_rate", "higher_rate", "final_on_shelf_rate"]
+    merged.loc[range_missing_mask, rate_columns] = 0.0
+    merged.loc[range_missing_mask, "final_rate_basis"] = "range_missing_as_zero"
 
     result = merged[
         [
@@ -228,6 +232,7 @@ def main() -> None:
     print("store_based_rate = display_stores / distinct_stores / range_percent")
     print("higher_rate = MAX(visit_based_rate, store_based_rate)")
     print("final_on_shelf_rate = visit_based_rate")
+    print("range missing rows output as 0% in the final report")
     print()
     print("Rows:", len(result))
     print("Status counts:")

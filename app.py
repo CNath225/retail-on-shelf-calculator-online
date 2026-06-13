@@ -301,6 +301,79 @@ def run_command(command: list[str], output_root: Path, history_db: Path) -> subp
     return subprocess.run(command, capture_output=True, text=True, env=env)
 
 
+def summarize_raw_upload(path: Optional[Path]) -> dict[str, object]:
+    if not path or not path.exists():
+        return {}
+
+    try:
+        from step1_prepare_raw_data import (
+            ACCOUNT_NAME_TO_CODE,
+            find_raw_submission_sheet,
+            get_account_code,
+            normalize_raw_submission_columns,
+            raw_month_counts,
+        )
+
+        raw_sheet = find_raw_submission_sheet(path)
+        raw_df = pd.read_excel(path, sheet_name=raw_sheet)
+        raw_df = normalize_raw_submission_columns(raw_df)
+        raw_df = raw_df[raw_df["Place ID"].notna()].copy()
+        account_counts = (
+            raw_df.apply(lambda row: get_account_code(row, ACCOUNT_NAME_TO_CODE), axis=1)
+            .replace("", "(unknown)")
+            .value_counts(dropna=False)
+            .sort_index()
+        )
+        month_counts = raw_month_counts(raw_df)
+        dominant_month = max(month_counts, key=month_counts.get) if month_counts else ""
+        return {
+            "sheet": raw_sheet,
+            "rows": int(len(raw_df)),
+            "month_counts": month_counts,
+            "dominant_month": dominant_month,
+            "account_counts": {str(key): int(value) for key, value in account_counts.items()},
+        }
+    except SystemExit as error:
+        return {"error": str(error)}
+    except Exception as error:
+        return {"error": f"Could not inspect raw file: {error}"}
+
+
+def file_signature(path: Optional[Path]) -> Optional[dict[str, object]]:
+    if not path or not path.exists():
+        return None
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def input_signature(
+    month: str,
+    month_label: str,
+    previous_month_label: str,
+    raw_path: Optional[Path],
+    range_path: Optional[Path],
+    template_path: Optional[Path],
+    range_sheet: str,
+    template_sheet: str,
+    keep_history_columns: bool,
+) -> dict[str, object]:
+    return {
+        "month": month,
+        "month_label": month_label,
+        "previous_month_label": previous_month_label,
+        "raw": file_signature(raw_path),
+        "range": file_signature(range_path),
+        "template": file_signature(template_path),
+        "range_sheet": range_sheet,
+        "template_sheet": template_sheet,
+        "keep_history_columns": keep_history_columns,
+    }
+
+
 def render_report(final_report: Path, step3_csv: Path, count_csv: Path) -> None:
     st.download_button(
         "Download Report",
@@ -435,9 +508,19 @@ def main() -> None:
         st.button("Clear Session Files", on_click=clear_session_files)
 
     validation_errors = []
+    raw_summary = summarize_raw_upload(raw_path) if raw_path else {}
     if raw_path and not workbook_looks_like(raw_path, "raw"):
         validation_errors.append(
             "Raw Export file looks wrong. Upload the Repsly raw export here; it should contain Place ID plus ID or Date and time columns."
+        )
+    if raw_summary.get("error"):
+        validation_errors.append(str(raw_summary["error"]))
+    elif raw_summary.get("dominant_month") and raw_summary["dominant_month"] != month:
+        validation_errors.append(
+            "Raw month check failed. "
+            f"The selected report month is {month}, but the raw file dates are mostly {raw_summary['dominant_month']}. "
+            f"Raw month counts: {raw_summary.get('month_counts', {})}. "
+            "Please select the matching month or upload the correct raw export."
         )
     if range_path and not workbook_looks_like(range_path, "range", range_sheet):
         validation_errors.append(
@@ -459,6 +542,10 @@ def main() -> None:
             "template_file": template_file.name if template_file else "",
             "range_sheet": range_sheet,
             "template_sheet": template_sheet,
+            "raw_sheet": raw_summary.get("sheet", ""),
+            "raw_rows": raw_summary.get("rows", ""),
+            "raw_month_counts": raw_summary.get("month_counts", {}),
+            "raw_account_counts": raw_summary.get("account_counts", {}),
         }
     )
 
@@ -470,6 +557,24 @@ def main() -> None:
     if not ready:
         st.info("Upload Raw Export, Range Table, and Report Template workbooks.")
         return
+
+    current_input_signature = input_signature(
+        month=month,
+        month_label=month_label,
+        previous_month_label=previous_month_label,
+        raw_path=raw_path,
+        range_path=range_path,
+        template_path=template_path,
+        range_sheet=range_sheet,
+        template_sheet=template_sheet,
+        keep_history_columns=keep_history_columns,
+    )
+    if (
+        st.session_state.get("last_report_state")
+        and st.session_state["last_report_state"].get("input_signature") != current_input_signature
+    ):
+        st.session_state["last_report_state"] = None
+        st.info("Inputs changed. Generate a new report so an old result is not shown with new selections.")
 
     if st.button("Generate Report", type="primary"):
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
@@ -516,6 +621,7 @@ def main() -> None:
             "final_report": str(run_output_root / month / f"on_shelf_report_preview_{month}.xlsx"),
             "step3_csv": str(run_output_root / month / f"key_sku_display_rate_{month}.csv"),
             "count_csv": str(run_output_root / month / f"display_count_summary_{month}.csv"),
+            "input_signature": current_input_signature,
         }
         st.success("Report generated.")
 

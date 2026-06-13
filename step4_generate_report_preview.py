@@ -79,7 +79,7 @@ def rate_to_report_value(row: pd.Series):
     if row["rate_status"] == "ok":
         return row["final_on_shelf_rate"]
     if row["rate_status"] == "range missing":
-        return "range missing"
+        return 0.0
     if row["rate_status"] == "not visited":
         return "not visited"
     return ""

@@ -179,6 +179,8 @@ def main() -> None:
     ]
     if args.disable_master_data:
         step1_command.append("--disable-master-data")
+    if args.allow_month_mismatch:
+        step1_command.append("--allow-month-mismatch")
     run_step(step1_command)
 
     run_step(
@@ -243,6 +245,8 @@ def main() -> None:
             args.template_sheet,
             "--month-label",
             args.month_label,
+            "--history-db",
+            args.master_db,
         ]
     )
 

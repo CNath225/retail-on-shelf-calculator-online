@@ -67,7 +67,7 @@ DEFAULT_SKU_SPECS = [
     {"category": "Robot", "sku": "Matrix10 Ultra", "raw_columns": ["Matrix10 Ultra"]},
     {"category": "Robot", "sku": "Aqua10 Ultra Track S", "raw_columns": ["Aqua10 Ultra Track S", "Aqua10 Ultra Track S "]},
     {"category": "Robot", "sku": "Aqua10 Ultra Roller", "raw_columns": ["Aqua10 Ultra Roller"]},
-    {"category": "Robot", "sku": "Aqua10 Roller AE", "raw_columns": ["Aqua10 Roller AE (JB)"]},
+    {"category": "Robot", "sku": "Aqua10 Roller AE", "raw_columns": ["Aqua10 Roller AE", "Aqua10 Roller AE (JB)"]},
     {"category": "Robot", "sku": "Aqua10 Roller", "raw_columns": ["Aqua10 Roller"]},
     {"category": "Robot", "sku": "L50 Ultra", "raw_columns": ["L50 Ultra"]},
     {"category": "Stick", "sku": "Z20 Station", "raw_columns": ["Z20 Station"]},

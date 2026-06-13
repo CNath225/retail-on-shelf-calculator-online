@@ -34,7 +34,7 @@ SKU_SPECS = [
         "raw_columns": ["Aqua10 Ultra Track S", "Aqua10 Ultra Track S "],
     },
     {"category": "Robot", "sku": "Aqua10 Ultra Roller", "raw_columns": ["Aqua10 Ultra Roller"]},
-    {"category": "Robot", "sku": "Aqua10 Roller AE", "raw_columns": ["Aqua10 Roller AE (JB)"]},
+    {"category": "Robot", "sku": "Aqua10 Roller AE", "raw_columns": ["Aqua10 Roller AE", "Aqua10 Roller AE (JB)"]},
     {"category": "Robot", "sku": "Aqua10 Roller", "raw_columns": ["Aqua10 Roller"]},
     {"category": "Robot", "sku": "L50 Ultra", "raw_columns": ["L50 Ultra"]},
     {"category": "Stick", "sku": "Z20 Station", "raw_columns": ["Z20 Station"]},
@@ -75,6 +75,34 @@ def normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value).strip()) if not pd.isna(value) else ""
 
 
+def normalize_match_key(value: object) -> str:
+    return normalize_text(value).upper()
+
+
+def strip_trailing_alias_suffix(value: object) -> str:
+    text = normalize_text(value)
+    suffix_pattern = re.compile(r"\s*(\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\})\s*$")
+    while suffix_pattern.search(text):
+        text = suffix_pattern.sub("", text).strip()
+    return text
+
+
+def raw_column_matches_candidate(column: object, candidate: object) -> bool:
+    column_text = normalize_text(column)
+    candidate_text = normalize_text(candidate)
+    if not column_text or not candidate_text:
+        return False
+
+    column_key = normalize_match_key(column_text)
+    candidate_key = normalize_match_key(candidate_text)
+    if column_key == candidate_key:
+        return True
+
+    column_base_key = normalize_match_key(strip_trailing_alias_suffix(column_text))
+    candidate_base_key = normalize_match_key(strip_trailing_alias_suffix(candidate_text))
+    return column_base_key == candidate_key or column_base_key == candidate_base_key
+
+
 def get_account_from_place_id(place_id: object) -> str:
     if pd.isna(place_id):
         return ""
@@ -100,11 +128,16 @@ def get_account_code(row: pd.Series, account_name_to_code: dict[str, str]) -> st
 
 
 def find_raw_column(raw_df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
-    normalized_columns = {normalize_text(column): column for column in raw_df.columns}
+    normalized_columns = {normalize_match_key(column): column for column in raw_df.columns}
     for candidate in candidates:
-        normalized_candidate = normalize_text(candidate)
+        normalized_candidate = normalize_match_key(candidate)
         if normalized_candidate in normalized_columns:
             return normalized_columns[normalized_candidate]
+
+    for candidate in candidates:
+        for column in raw_df.columns:
+            if raw_column_matches_candidate(column, candidate):
+                return column
     return None
 
 
@@ -175,10 +208,43 @@ def normalize_raw_submission_columns(raw_df: pd.DataFrame) -> pd.DataFrame:
     return raw_df
 
 
+def raw_month_counts(raw_df: pd.DataFrame) -> dict[str, int]:
+    if "Date and time" not in raw_df.columns:
+        return {}
+
+    parsed_dates = pd.to_datetime(raw_df["Date and time"], errors="coerce", format="mixed")
+    months = parsed_dates.dropna().dt.strftime("%Y-%m")
+    if months.empty:
+        return {}
+    return {str(month): int(count) for month, count in months.value_counts().sort_index().items()}
+
+
+def validate_raw_month(
+    raw_df: pd.DataFrame,
+    expected_month: str,
+    allow_month_mismatch: bool,
+) -> None:
+    counts = raw_month_counts(raw_df)
+    raw_df.attrs["raw_month_counts"] = counts
+    if allow_month_mismatch or not counts:
+        return
+
+    dominant_month = max(counts, key=counts.get)
+    if dominant_month != expected_month:
+        counts_text = ", ".join(f"{month}: {count}" for month, count in counts.items())
+        raise SystemExit(
+            "Raw file date check failed. "
+            f"Selected report month is {expected_month}, but raw submission dates are mostly {dominant_month}. "
+            f"Month counts: {counts_text}. "
+            "Choose the matching month or use the correct raw export."
+        )
+
+
 def read_raw_submissions(
     raw_file: Path,
     month: str,
     account_name_to_code: dict[str, str],
+    allow_month_mismatch: bool = False,
 ) -> pd.DataFrame:
     raw_sheet = find_raw_submission_sheet(raw_file)
     raw_df = pd.read_excel(raw_file, sheet_name=raw_sheet)
@@ -187,6 +253,7 @@ def read_raw_submissions(
 
     # Keep only real submissions. Excel sometimes has formatted empty rows.
     raw_df = raw_df[raw_df["Place ID"].notna()].copy()
+    validate_raw_month(raw_df, month, allow_month_mismatch)
 
     raw_df["Month Clean"] = month
     raw_df["Country Clean"] = raw_df["Country"] if "Country" in raw_df.columns else "AU"
@@ -228,7 +295,11 @@ def make_display_long(
             raw_df[column] = ""
 
     for spec in sku_specs:
-        raw_column = find_raw_column(raw_df, spec["raw_columns"])
+        raw_column_candidates = list(spec["raw_columns"])
+        sku = spec.get("sku")
+        if sku:
+            raw_column_candidates.append(sku)
+        raw_column = find_raw_column(raw_df, raw_column_candidates)
 
         if raw_column is None:
             quality_rows.append(
@@ -236,7 +307,7 @@ def make_display_long(
                     "issue_type": "missing_sku_column",
                     "category": spec["category"],
                     "sku": spec["sku"],
-                    "detail": f"Could not find any of: {', '.join(spec['raw_columns'])}",
+                    "detail": f"Could not find any of: {', '.join(raw_column_candidates)}",
                 }
             )
             continue
@@ -366,6 +437,11 @@ def print_summary(
     print(f"Input file: {raw_file}")
     print(f"Input sheet: {raw_df.attrs.get('source_sheet', 'Submissions')}")
     print(f"Month: {display_long['month'].iloc[0]}")
+    raw_months = raw_df.attrs.get("raw_month_counts", {})
+    if raw_months:
+        print("Raw date month counts:")
+        for raw_month, count in raw_months.items():
+            print(f"- {raw_month}: {count} submissions")
     print(f"Raw submission rows: {len(raw_df)}")
     print(f"Clean display rows: {len(display_long)}")
     print()
@@ -427,6 +503,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the built-in SKU and Account mappings instead of editable master data.",
     )
+    parser.add_argument(
+        "--allow-month-mismatch",
+        action="store_true",
+        help="Allow raw submission dates to differ from --month.",
+    )
     return parser.parse_args()
 
 
@@ -448,7 +529,12 @@ def main() -> None:
             sku_specs = SKU_SPECS
             account_name_to_code = ACCOUNT_NAME_TO_CODE
 
-    raw_df = read_raw_submissions(raw_file, args.month, account_name_to_code)
+    raw_df = read_raw_submissions(
+        raw_file,
+        args.month,
+        account_name_to_code,
+        allow_month_mismatch=args.allow_month_mismatch,
+    )
     display_long, data_quality = make_display_long(raw_df, sku_specs)
     csv_output, quality_output, db_output = save_outputs(
         raw_df, display_long, data_quality, output_dir
