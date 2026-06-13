@@ -474,7 +474,7 @@ def style_report_preview(frame: pd.DataFrame, month_label: str, trend_column: st
     green = "background-color: #C6EFCE; color: #006100"
     red = "background-color: #FFC7CE; color: #9C0006"
     category = "background-color: #0070C0; color: #FFFFFF; font-weight: 700"
-    channel = "background-color: #D6DCE4; color: #1F2328; font-weight: 700"
+    channel = "background-color: #A6CAEC; color: #1F2328; font-weight: 700"
 
     def style_row(row: pd.Series) -> list[str]:
         styles = ["" for _ in row]
@@ -643,8 +643,8 @@ def main() -> None:
         red_value_format = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
         category_text_format = workbook.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True})
         category_pct_format = workbook.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
-        channel_text_format = workbook.add_format({"bg_color": "#D6DCE4", "bold": True})
-        channel_pct_format = workbook.add_format({"bg_color": "#D6DCE4", "bold": True, "num_format": "0%"})
+        channel_text_format = workbook.add_format({"bg_color": "#A6CAEC", "bold": True})
+        channel_pct_format = workbook.add_format({"bg_color": "#A6CAEC", "bold": True, "num_format": "0%"})
 
         for sheet_name, df in {
             "Report Preview": output_df,

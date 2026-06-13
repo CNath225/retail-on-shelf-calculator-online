@@ -279,11 +279,7 @@ def render_app_title() -> None:
             font-size: clamp(2.1rem, 4vw, 3.5rem);
             font-weight: 800;
             line-height: 1.08;
-            /* follow the active Streamlit theme: dark text on light bg, light text on dark bg */
-            color: var(--text-color, #1f2328);
-          }
-          @media (prefers-color-scheme: dark) {
-            .app-title { color: var(--text-color, #f4f5f7); }
+            color: inherit;
           }
           .code-nathan {
             display: inline-block;
@@ -878,9 +874,22 @@ def main() -> None:
         smart_matching_enabled = st.checkbox(
             "Enable beta: smart identifier matching",
             value=False,
-            help="Default OFF keeps the v1.0 matching path unchanged.",
+            help=(
+                "Beta. Auto-matches raw SKU / account / category / country names to your master "
+                "entries when they differ only by channel suffix (e.g. '(JB)') or spelling, and flags "
+                "genuine look-alikes for you to confirm. Default OFF keeps the v1.0 matching path unchanged."
+            ),
         )
-        alias_import_file = st.file_uploader("Import Beta Alias Map", type=["json"])
+        st.caption(
+            "Beta matching and the alias map below are one feature. Turn matching on, resolve any "
+            "flagged values, then Export the alias map to reuse those decisions next month — Import it "
+            "to skip re-resolving (the online app does not store them permanently)."
+        )
+        alias_import_file = st.file_uploader(
+            "Import Beta Alias Map",
+            type=["json"],
+            help="Load alias decisions you exported in a previous session. Pairs with 'Export Beta Alias Map'.",
+        )
         if alias_import_file is not None:
             alias_signature = f"{alias_import_file.name}:{alias_import_file.size}"
             if st.session_state.get("_last_alias_import") != alias_signature:

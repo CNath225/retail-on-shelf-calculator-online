@@ -34,8 +34,8 @@ def write_workbook(path: Path, frame: pd.DataFrame) -> None:
         red = wb.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
         cat_text = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True})
         cat_pct = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
-        ch_text = wb.add_format({"bg_color": "#D6DCE4", "bold": True})
-        ch_pct = wb.add_format({"bg_color": "#D6DCE4", "bold": True, "num_format": "0%"})
+        ch_text = wb.add_format({"bg_color": "#A6CAEC", "bold": True})
+        ch_pct = wb.add_format({"bg_color": "#A6CAEC", "bold": True, "num_format": "0%"})
         ws = writer.sheets["Report Preview"]
         write_ttl_average_formulas(ws, frame, ["MAY", "JUN"], pct, cat_pct, ch_pct)
         apply_report_preview_formatting(ws, frame, "JUN", "MAY", "Trend", green, red, cat_text, ch_text)
@@ -51,7 +51,7 @@ class ReportFormattingTests(unittest.TestCase):
             # Category TTL row (position 5 -> excel row 7): strong blue fill, white.
             self.assertEqual(ws.cell(row=7, column=1).fill.fgColor.rgb, "FF0070C0")
             # Channel TTL row (position 2 -> excel row 4): lighter fill.
-            self.assertEqual(ws.cell(row=4, column=1).fill.fgColor.rgb, "FFD6DCE4")
+            self.assertEqual(ws.cell(row=4, column=1).fill.fgColor.rgb, "FFA6CAEC")
             # Detail row (position 0 -> excel row 2): no fill.
             self.assertIsNone(ws.cell(row=2, column=1).fill.patternType)
             # TTL JUN cell carries an AVERAGE formula and the blue fill.
