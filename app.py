@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -11,12 +13,24 @@ import uuid
 import pandas as pd
 import streamlit as st
 
+from identifier_matching import (
+    CanonicalEntry,
+    build_resolution_items,
+    clean_text,
+    display_like_columns,
+    items_to_frame,
+    load_alias_decisions,
+    normalize_identifier,
+    save_alias_decisions,
+    summarize_items,
+)
 
 TOOL_DIR = Path(__file__).parent
 RUNTIME_DIR = TOOL_DIR / ".runtime"
 UPLOAD_DIR = RUNTIME_DIR / "uploads"
 OUTPUT_ROOT = RUNTIME_DIR / "outputs"
 APP_TITLE = "Retail On-shelf Rate Calculator Online by CodeNATHAN"
+APP_VERSION = "v1.1-beta"
 
 RANGE_SHEET_PREFERENCES = ["Master data", "Key SKU Display% (2)", "Key SKU Display%"]
 TEMPLATE_SHEET_PREFERENCES = ["ANZ On-Shelf Retailer", "ANZ On-Shelf Retailer (2)", "数据不含公式版"]
@@ -276,6 +290,17 @@ def render_app_title() -> None:
             text-shadow: 0 0 12px rgba(169, 130, 53, 0.35), 0 0 2px rgba(255, 255, 255, 0.25);
             animation: codeJump 1.25s steps(2, end) infinite;
           }
+          .app-version {
+            display: inline-block;
+            margin: -0.75rem 0 1.25rem;
+            padding: 0.16rem 0.52rem;
+            border: 1px solid rgba(185, 148, 78, 0.5);
+            border-radius: 6px;
+            color: #c8b27d;
+            background: rgba(32, 34, 38, 0.72);
+            font-size: 0.82rem;
+            letter-spacing: 0;
+          }
           @keyframes codeJump {
             0%, 100% { transform: translateY(0); filter: brightness(1); }
             28% { transform: translateY(-1px); filter: brightness(1.25); }
@@ -288,6 +313,7 @@ def render_app_title() -> None:
           }
         </style>
         <div class="app-title">Retail On-shelf Rate Calculator Online by <span class="code-nathan">CodeNATHAN</span></div>
+        <div class="app-version">v1.1-beta</div>
         """,
         unsafe_allow_html=True,
     )
@@ -360,6 +386,8 @@ def input_signature(
     range_sheet: str,
     template_sheet: str,
     keep_history_columns: bool,
+    smart_matching_enabled: bool,
+    alias_decision_signature: str,
 ) -> dict[str, object]:
     return {
         "month": month,
@@ -371,10 +399,17 @@ def input_signature(
         "range_sheet": range_sheet,
         "template_sheet": template_sheet,
         "keep_history_columns": keep_history_columns,
+        "smart_matching_enabled": smart_matching_enabled,
+        "alias_decision_signature": alias_decision_signature if smart_matching_enabled else "",
     }
 
 
-def render_report(final_report: Path, step3_csv: Path, count_csv: Path) -> None:
+def render_report(
+    final_report: Path,
+    step3_csv: Path,
+    count_csv: Path,
+    identifier_quality_csv: Optional[Path] = None,
+) -> None:
     st.download_button(
         "Download Report",
         data=final_report.read_bytes(),
@@ -382,7 +417,13 @@ def render_report(final_report: Path, step3_csv: Path, count_csv: Path) -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         on_click="ignore",
     )
-    preview_tab, detail_tab, count_tab = st.tabs(["Preview", "Rate Detail", "Display Counts"])
+    tabs = ["Preview", "Rate Detail", "Display Counts"]
+    if identifier_quality_csv and identifier_quality_csv.exists():
+        tabs.append("Identifier Quality")
+    rendered_tabs = st.tabs(tabs)
+    preview_tab = rendered_tabs[0]
+    detail_tab = rendered_tabs[1]
+    count_tab = rendered_tabs[2]
     with preview_tab:
         st.dataframe(pd.read_excel(final_report, sheet_name="Report Preview"), use_container_width=True, height=520)
     with detail_tab:
@@ -391,6 +432,9 @@ def render_report(final_report: Path, step3_csv: Path, count_csv: Path) -> None:
     with count_tab:
         if count_csv.exists():
             st.dataframe(pd.read_csv(count_csv), use_container_width=True, height=520)
+    if identifier_quality_csv and identifier_quality_csv.exists() and len(rendered_tabs) > 3:
+        with rendered_tabs[3]:
+            st.dataframe(pd.read_csv(identifier_quality_csv), use_container_width=True, height=520)
 
 
 def init_state() -> None:
@@ -401,6 +445,7 @@ def init_state() -> None:
     st.session_state.setdefault("_last_raw_filename", "")
     st.session_state.setdefault("last_report_state", None)
     st.session_state.setdefault("last_run_log", "")
+    st.session_state.setdefault("identifier_alias_decisions", [])
 
 
 def clear_session_files() -> None:
@@ -410,6 +455,399 @@ def clear_session_files() -> None:
             shutil.rmtree(path)
     st.session_state["last_report_state"] = None
     st.session_state["last_run_log"] = ""
+
+
+def decision_key(domain: str, raw_value: object) -> str:
+    digest = hashlib.sha1(f"{domain}|{clean_text(raw_value)}".encode("utf-8")).hexdigest()[:12]
+    return f"{domain}_{digest}"
+
+
+def alias_decision_signature(decisions: list[dict[str, object]]) -> str:
+    payload = json.dumps(decisions, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def read_sheet_safe(path: Optional[Path], sheet: str) -> pd.DataFrame:
+    if not path or not path.exists() or not sheet:
+        return pd.DataFrame()
+    try:
+        return pd.read_excel(path, sheet_name=sheet)
+    except Exception:
+        return pd.DataFrame()
+
+
+def unique_column_values(frame: pd.DataFrame, columns: list[str]) -> list[str]:
+    values: set[str] = set()
+    normalized_columns = {normalize_column_label(column): column for column in frame.columns}
+    for wanted in columns:
+        source = normalized_columns.get(normalize_column_label(wanted))
+        if source is None:
+            continue
+        values.update(clean_text(value) for value in frame[source].dropna().tolist() if clean_text(value))
+    return sorted(values)
+
+
+def canonical_entries_from_sources(
+    range_path: Optional[Path],
+    range_sheet: str,
+    template_path: Optional[Path],
+    template_sheet: str,
+) -> dict[str, list[CanonicalEntry]]:
+    from step1_prepare_raw_data import ACCOUNT_NAME_TO_CODE, SKU_SPECS
+
+    range_frame = read_sheet_safe(range_path, range_sheet)
+    template_frame = read_sheet_safe(template_path, template_sheet)
+
+    sku_entries: dict[str, CanonicalEntry] = {}
+    for spec in SKU_SPECS:
+        sku = clean_text(spec.get("sku", ""))
+        if not sku:
+            continue
+        sku_entries[normalize_identifier(sku).key] = CanonicalEntry(
+            domain="sku",
+            canonical=sku,
+            aliases=tuple(str(value) for value in spec.get("raw_columns", [])),
+            metadata={"category": clean_text(spec.get("category", ""))},
+        )
+    for _, row in range_frame.iterrows():
+        sku = clean_text(row.get("SKU", row.get("sku", "")))
+        category = clean_text(row.get("Category", row.get("category", "")))
+        if sku and normalize_identifier(sku).key not in sku_entries:
+            sku_entries[normalize_identifier(sku).key] = CanonicalEntry(
+                domain="sku",
+                canonical=sku,
+                aliases=(sku,),
+                metadata={"category": category},
+            )
+
+    account_entries = {
+        normalize_identifier(account).key: CanonicalEntry(
+            domain="account",
+            canonical=account,
+            aliases=tuple(
+                account_name
+                for account_name, mapped_account in ACCOUNT_NAME_TO_CODE.items()
+                if mapped_account == account
+            ),
+        )
+        for account in sorted(set(ACCOUNT_NAME_TO_CODE.values()) | set(unique_column_values(range_frame, ["Account", "Channel"])))
+        if account
+    }
+
+    category_values = set(unique_column_values(range_frame, ["Category"]))
+    category_values.update(unique_column_values(template_frame, ["Category"]))
+    category_values.update(entry.metadata.get("category", "") for entry in sku_entries.values())
+    category_entries = [
+        CanonicalEntry(domain="category", canonical=value)
+        for value in sorted(value for value in category_values if value)
+    ]
+
+    country_values = set(unique_column_values(range_frame, ["Country"]))
+    country_values.update(unique_column_values(template_frame, ["Country"]))
+    country_values.update(["AU"])
+    country_entries = [
+        CanonicalEntry(domain="country", canonical=value)
+        for value in sorted(value for value in country_values if value)
+    ]
+
+    return {
+        "sku": list(sku_entries.values()),
+        "account": list(account_entries.values()),
+        "category": category_entries,
+        "country": country_entries,
+    }
+
+
+def raw_identifier_values(
+    raw_path: Optional[Path],
+    range_path: Optional[Path],
+    range_sheet: str,
+    template_path: Optional[Path],
+    template_sheet: str,
+) -> dict[str, list[str]]:
+    if not raw_path or not raw_path.exists():
+        return {"sku": [], "account": [], "category": [], "country": []}
+    from step1_prepare_raw_data import (
+        find_raw_submission_sheet,
+        get_account_from_place_id,
+        normalize_raw_submission_columns,
+    )
+
+    raw_sheet = find_raw_submission_sheet(raw_path)
+    raw_frame = pd.read_excel(raw_path, sheet_name=raw_sheet)
+    raw_frame = normalize_raw_submission_columns(raw_frame)
+    raw_frame = raw_frame[raw_frame["Place ID"].notna()].copy()
+
+    range_frame = read_sheet_safe(range_path, range_sheet)
+    template_frame = read_sheet_safe(template_path, template_sheet)
+
+    account_values = set()
+    for column in ["Account Name", "Account"]:
+        if column in raw_frame.columns:
+            account_values.update(clean_text(value) for value in raw_frame[column].dropna().tolist() if clean_text(value))
+    account_values.update(
+        clean_text(get_account_from_place_id(value))
+        for value in raw_frame["Place ID"].dropna().tolist()
+        if clean_text(get_account_from_place_id(value))
+    )
+
+    country_values = (
+        set(clean_text(value) for value in raw_frame["Country"].dropna().tolist() if clean_text(value))
+        if "Country" in raw_frame.columns
+        else {"AU"}
+    )
+
+    category_values = set(unique_column_values(range_frame, ["Category"]))
+    category_values.update(unique_column_values(template_frame, ["Category"]))
+
+    return {
+        "sku": display_like_columns(raw_frame),
+        "account": sorted(account_values),
+        "category": sorted(category_values),
+        "country": sorted(country_values),
+    }
+
+
+def build_identifier_resolution(
+    raw_path: Optional[Path],
+    range_path: Optional[Path],
+    range_sheet: str,
+    template_path: Optional[Path],
+    template_sheet: str,
+    decisions: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, list[CanonicalEntry]]]:
+    canonicals = canonical_entries_from_sources(range_path, range_sheet, template_path, template_sheet)
+    raw_values = raw_identifier_values(raw_path, range_path, range_sheet, template_path, template_sheet)
+    items = []
+    for domain in ["sku", "account", "category", "country"]:
+        items.extend(
+            item.as_dict()
+            for item in build_resolution_items(
+                domain,
+                raw_values[domain],
+                canonicals[domain],
+                decisions=decisions,
+            )
+        )
+    return items, canonicals
+
+
+def auto_decisions_from_quality(quality_frame: pd.DataFrame) -> list[dict[str, object]]:
+    if quality_frame.empty:
+        return []
+    rows = []
+    for _, row in quality_frame[quality_frame["status"].eq("auto_normalized")].iterrows():
+        rows.append(
+            {
+                "domain": row["domain"],
+                "raw_value": row["raw_value"],
+                "canonical": row["canonical"],
+                "action": "map",
+                "channel": "A",
+                "reason": row["reason"],
+            }
+        )
+    return rows
+
+
+def merge_alias_decisions(
+    auto_decisions: list[dict[str, object]],
+    manual_decisions: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged = {
+        decision_key(decision.get("domain", ""), decision.get("raw_value", "")): decision
+        for decision in auto_decisions
+    }
+    for decision in manual_decisions:
+        merged[decision_key(decision.get("domain", ""), decision.get("raw_value", ""))] = decision
+    return list(merged.values())
+
+
+def valid_manual_decision(decision: dict[str, object]) -> bool:
+    action = decision.get("action", "")
+    if action in {"skip_this_run", "skip_always", "map"}:
+        return True
+    if action == "add_new" and decision.get("domain") in {"sku", "account"}:
+        required = ["canonical", "category", "country", "ttl_store_count", "range_store_count"]
+        return all(clean_text(decision.get(column, "")) for column in required)
+    if action == "add_new":
+        return bool(clean_text(decision.get("canonical", "")))
+    return False
+
+
+def render_identifier_resolution(
+    raw_path: Optional[Path],
+    range_path: Optional[Path],
+    range_sheet: str,
+    template_path: Optional[Path],
+    template_sheet: str,
+) -> tuple[bool, list[dict[str, object]], pd.DataFrame]:
+    decisions = st.session_state.get("identifier_alias_decisions", [])
+    items, canonicals = build_identifier_resolution(
+        raw_path,
+        range_path,
+        range_sheet,
+        template_path,
+        template_sheet,
+        decisions,
+    )
+    item_objects = [
+        build_resolution_items(
+            item["domain"],
+            [item["raw_value"]],
+            canonicals[item["domain"]],
+            decisions=decisions,
+        )[0]
+        for item in items
+    ]
+    summary_by_domain = []
+    for domain in ["sku", "account", "category", "country"]:
+        domain_items = [item for item in item_objects if item.domain == domain]
+        summary = summarize_items(domain_items)
+        summary_by_domain.append({"domain": domain, **summary})
+
+    quality_frame = pd.DataFrame([item.as_dict() for item in item_objects])
+    st.subheader("Beta Identifier Resolution")
+    st.caption("Beta ON: report generation is blocked until review/ambiguous/unmatched values are resolved or explicitly skipped.")
+    st.dataframe(pd.DataFrame(summary_by_domain), use_container_width=True, height=180)
+
+    auto_frame = quality_frame[quality_frame["status"].eq("auto_normalized")] if not quality_frame.empty else pd.DataFrame()
+    pending_frame = quality_frame[quality_frame["status"].isin(["confusable", "ambiguous", "unmatched"])] if not quality_frame.empty else pd.DataFrame()
+
+    with st.expander("Auto-normalized spelling-only matches", expanded=False):
+        st.dataframe(auto_frame, use_container_width=True, height=260)
+
+    saved_decisions = {decision_key(item["domain"], item["raw_value"]): item for item in decisions}
+    draft_decisions: list[dict[str, object]] = []
+    if pending_frame.empty:
+        st.success("No pending identifier issues. Beta smart matching can generate the report.")
+        return True, decisions, quality_frame
+
+    st.warning("Some identifiers need confirmation before beta report generation.")
+    for _, row in pending_frame.head(80).iterrows():
+        key = decision_key(row["domain"], row["raw_value"])
+        existing_decision = saved_decisions.get(key, {})
+        st.markdown(f"**{row['domain'].upper()}**: `{row['raw_value']}`")
+        if row["status"] == "confusable":
+            st.error(
+                "Confusable pair: likely DIFFERENT entity. "
+                f"Diff: {row.get('differing_token', '')}; near: {row.get('confusable_with', [])}"
+            )
+        elif row["status"] == "ambiguous":
+            st.error(f"Ambiguous: multiple candidates {row.get('candidates', [])}")
+
+        options = ["", "Map to existing", "Add as new", "Skip this run", "Skip always"]
+        default_option = "Add as new" if row["status"] == "confusable" else ""
+        if existing_decision:
+            existing_action = existing_decision.get("action", "")
+            default_option = {
+                "map": "Map to existing",
+                "add_new": "Add as new",
+                "skip_this_run": "Skip this run",
+                "skip_always": "Skip always",
+            }.get(existing_action, default_option)
+        action = st.selectbox(
+            "Action",
+            options,
+            index=options.index(default_option) if default_option in options else 0,
+            key=f"{key}_action",
+        )
+        canonical_options = [entry.canonical for entry in canonicals[row["domain"]]]
+        canonical = existing_decision.get("canonical", row["raw_value"])
+        if action == "Map to existing":
+            canonical = st.selectbox(
+                "Existing master entry",
+                canonical_options,
+                index=canonical_options.index(canonical) if canonical in canonical_options else 0,
+                key=f"{key}_canonical",
+            )
+        elif action == "Add as new":
+            canonical = st.text_input(
+                "New canonical value",
+                value=str(existing_decision.get("canonical", row["raw_value"])),
+                key=f"{key}_new_canonical",
+            )
+            if row["domain"] in {"sku", "account"}:
+                category = st.text_input(
+                    "Category required for new SKU/account",
+                    value=str(existing_decision.get("category", "")),
+                    key=f"{key}_category",
+                )
+                country = st.text_input(
+                    "Country required for new SKU/account",
+                    value=str(existing_decision.get("country", "AU")),
+                    key=f"{key}_country",
+                )
+                ttl_store = st.text_input(
+                    "TTL Store# required for new SKU/account",
+                    value=str(existing_decision.get("ttl_store_count", "")),
+                    key=f"{key}_ttl",
+                )
+                range_store = st.text_input(
+                    "Range# required for new SKU/account",
+                    value=str(existing_decision.get("range_store_count", "")),
+                    key=f"{key}_range",
+                )
+            else:
+                category = ""
+                country = ""
+                ttl_store = ""
+                range_store = ""
+        else:
+            category = ""
+            country = ""
+            ttl_store = ""
+            range_store = ""
+
+        if action:
+            internal_action = {
+                "Map to existing": "map",
+                "Add as new": "add_new",
+                "Skip this run": "skip_this_run",
+                "Skip always": "skip_always",
+            }[action]
+            draft = {
+                "domain": row["domain"],
+                "raw_value": row["raw_value"],
+                "canonical": canonical if internal_action in {"map", "add_new"} else "",
+                "action": internal_action,
+                "channel": "B" if row["status"] in {"confusable", "ambiguous"} else "manual",
+                "status_at_review": row["status"],
+            }
+            if internal_action == "add_new" and row["domain"] in {"sku", "account"}:
+                draft.update(
+                    {
+                        "category": category,
+                        "country": country,
+                        "ttl_store_count": ttl_store,
+                        "range_store_count": range_store,
+                    }
+                )
+            draft_decisions.append(draft)
+
+    if st.button("Save Beta Resolution Decisions"):
+        invalid = [decision for decision in draft_decisions if not valid_manual_decision(decision)]
+        if invalid:
+            st.error("Some beta decisions are incomplete. New SKU/account needs category, country, TTL Store#, and Range#.")
+            st.stop()
+        merged = [decision for decision in decisions if decision_key(decision.get("domain", ""), decision.get("raw_value", "")) not in {decision_key(item["domain"], item["raw_value"]) for item in draft_decisions}]
+        merged.extend(draft_decisions)
+        st.session_state["identifier_alias_decisions"] = merged
+        st.rerun()
+
+    resolved_keys = {
+        decision_key(decision.get("domain", ""), decision.get("raw_value", ""))
+        for decision in st.session_state.get("identifier_alias_decisions", [])
+        if valid_manual_decision(decision)
+    }
+    pending_keys = {
+        decision_key(row["domain"], row["raw_value"])
+        for _, row in pending_frame.iterrows()
+    }
+    ready = pending_keys.issubset(resolved_keys)
+    if not ready:
+        st.info("Resolve or skip every pending identifier before generating the beta report.")
+    return ready, st.session_state.get("identifier_alias_decisions", []), quality_frame
 
 
 def main() -> None:
@@ -422,6 +860,36 @@ def main() -> None:
         raw_file = st.file_uploader("Resply Raw Export", type=["xlsx"])
         range_file = st.file_uploader("Range Table", type=["xlsx"])
         template_file = st.file_uploader("Report Template", type=["xlsx"])
+        smart_matching_enabled = st.checkbox(
+            "Enable beta: smart identifier matching",
+            value=False,
+            help="Default OFF keeps the v1.0 matching path unchanged.",
+        )
+        alias_import_file = st.file_uploader("Import Beta Alias Map", type=["json"])
+        if alias_import_file is not None:
+            alias_signature = f"{alias_import_file.name}:{alias_import_file.size}"
+            if st.session_state.get("_last_alias_import") != alias_signature:
+                try:
+                    payload = json.loads(alias_import_file.getvalue().decode("utf-8"))
+                    st.session_state["identifier_alias_decisions"] = (
+                        payload.get("decisions", payload) if isinstance(payload, dict) else payload
+                    )
+                    st.session_state["_last_alias_import"] = alias_signature
+                    st.success("Beta alias map imported for this session.")
+                except Exception as error:
+                    st.error(f"Could not import alias map: {error}")
+        if st.session_state.get("identifier_alias_decisions"):
+            export_payload = {
+                "version": 1,
+                "decisions": st.session_state["identifier_alias_decisions"],
+            }
+            st.download_button(
+                "Export Beta Alias Map",
+                data=json.dumps(export_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name="identifier_alias_map.json",
+                mime="application/json",
+                on_click="ignore",
+            )
 
         if raw_file is not None:
             inferred_month, inferred_label = infer_month_from_filename(raw_file.name)
@@ -546,6 +1014,8 @@ def main() -> None:
             "raw_rows": raw_summary.get("rows", ""),
             "raw_month_counts": raw_summary.get("month_counts", {}),
             "raw_account_counts": raw_summary.get("account_counts", {}),
+            "smart_identifier_matching": "ON" if smart_matching_enabled else "OFF",
+            "app_version": APP_VERSION,
         }
     )
 
@@ -558,6 +1028,20 @@ def main() -> None:
         st.info("Upload Raw Export, Range Table, and Report Template workbooks.")
         return
 
+    identifier_quality_frame = pd.DataFrame()
+    beta_alias_decisions = []
+    if smart_matching_enabled:
+        beta_ready, beta_alias_decisions, identifier_quality_frame = render_identifier_resolution(
+            raw_path,
+            range_path,
+            range_sheet,
+            template_path,
+            template_sheet,
+        )
+        ready = ready and beta_ready
+        if not ready:
+            return
+
     current_input_signature = input_signature(
         month=month,
         month_label=month_label,
@@ -568,6 +1052,8 @@ def main() -> None:
         range_sheet=range_sheet,
         template_sheet=template_sheet,
         keep_history_columns=keep_history_columns,
+        smart_matching_enabled=smart_matching_enabled,
+        alias_decision_signature=alias_decision_signature(beta_alias_decisions),
     )
     if (
         st.session_state.get("last_report_state")
@@ -580,6 +1066,17 @@ def main() -> None:
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
         run_output_root = OUTPUT_ROOT / st.session_state["session_id"] / run_id
         history_db = run_output_root / "retail_on_shelf_history.duckdb"
+        identifier_quality_csv = run_output_root / month / f"identifier_quality_{month}.csv"
+        alias_map_path = run_output_root / "identifier_alias_map.json"
+        if smart_matching_enabled:
+            run_output_root.mkdir(parents=True, exist_ok=True)
+            (run_output_root / month).mkdir(parents=True, exist_ok=True)
+            identifier_quality_frame.to_csv(identifier_quality_csv, index=False)
+            alias_decisions_for_run = merge_alias_decisions(
+                auto_decisions_from_quality(identifier_quality_frame),
+                beta_alias_decisions,
+            )
+            save_alias_decisions(alias_map_path, alias_decisions_for_run)
         command = [
             sys.executable,
             str(TOOL_DIR / "run_monthly_report.py"),
@@ -605,6 +1102,14 @@ def main() -> None:
             "--template-sheet",
             template_sheet,
         ]
+        if smart_matching_enabled:
+            command.extend(
+                [
+                    "--enable-smart-matching",
+                    "--identifier-alias-map",
+                    str(alias_map_path),
+                ]
+            )
         if keep_history_columns:
             command.append("--keep-history-columns")
 
@@ -621,6 +1126,7 @@ def main() -> None:
             "final_report": str(run_output_root / month / f"on_shelf_report_preview_{month}.xlsx"),
             "step3_csv": str(run_output_root / month / f"key_sku_display_rate_{month}.csv"),
             "count_csv": str(run_output_root / month / f"display_count_summary_{month}.csv"),
+            "identifier_quality_csv": str(identifier_quality_csv) if smart_matching_enabled else "",
             "input_signature": current_input_signature,
         }
         st.success("Report generated.")
@@ -633,7 +1139,17 @@ def main() -> None:
         state = st.session_state["last_report_state"]
         final_report = Path(state["final_report"])
         if final_report.exists():
-            render_report(final_report, Path(state["step3_csv"]), Path(state["count_csv"]))
+            identifier_quality_path = (
+                Path(state["identifier_quality_csv"])
+                if state.get("identifier_quality_csv")
+                else None
+            )
+            render_report(
+                final_report,
+                Path(state["step3_csv"]),
+                Path(state["count_csv"]),
+                identifier_quality_path,
+            )
 
 
 if __name__ == "__main__":

@@ -149,6 +149,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep all month/history columns from the template in Report Preview.",
     )
+    parser.add_argument(
+        "--enable-smart-matching",
+        action="store_true",
+        help="Enable beta identifier matching. Default off keeps the v1.0 path.",
+    )
+    parser.add_argument(
+        "--identifier-alias-map",
+        default="",
+        help="Per-session JSON alias decisions for beta smart identifier matching.",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +191,10 @@ def main() -> None:
         step1_command.append("--disable-master-data")
     if args.allow_month_mismatch:
         step1_command.append("--allow-month-mismatch")
+    if args.enable_smart_matching:
+        step1_command.append("--enable-smart-matching")
+        if args.identifier_alias_map:
+            step1_command.extend(["--identifier-alias-map", args.identifier_alias_map])
     run_step(step1_command)
 
     run_step(

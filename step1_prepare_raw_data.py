@@ -7,6 +7,13 @@ from typing import Optional
 import duckdb
 import pandas as pd
 
+from identifier_matching import (
+    account_decision_map,
+    apply_sku_decisions_to_specs,
+    country_decision_map,
+    load_alias_decisions,
+    normalize_identifier,
+)
 from master_data import (
     DEFAULT_MASTER_DB,
     active_account_name_map,
@@ -115,16 +122,41 @@ def get_account_from_place_id(place_id: object) -> str:
     return ACCOUNT_MAPPING.get(account, account)
 
 
-def get_account_code(row: pd.Series, account_name_to_code: dict[str, str]) -> str:
+def normalized_lookup(mapping: dict[str, str]) -> dict[str, str]:
+    return {
+        normalize_identifier(raw_value).key: canonical
+        for raw_value, canonical in mapping.items()
+        if normalize_identifier(raw_value).key
+    }
+
+
+def get_account_code(
+    row: pd.Series,
+    account_name_to_code: dict[str, str],
+    smart_account_name_to_code: Optional[dict[str, str]] = None,
+) -> str:
     account_name = normalize_text(row.get("Account Name", ""))
     if account_name in account_name_to_code:
         return account_name_to_code[account_name]
+    if smart_account_name_to_code:
+        account_name_key = normalize_identifier(account_name).key
+        if account_name_key in smart_account_name_to_code:
+            return smart_account_name_to_code[account_name_key]
 
     account = normalize_text(row.get("Account", ""))
     if account:
+        if smart_account_name_to_code:
+            account_key = normalize_identifier(account).key
+            if account_key in smart_account_name_to_code:
+                return smart_account_name_to_code[account_key]
         return ACCOUNT_MAPPING.get(account, account)
 
-    return get_account_from_place_id(row.get("Place ID", ""))
+    place_account = get_account_from_place_id(row.get("Place ID", ""))
+    if smart_account_name_to_code:
+        place_account_key = normalize_identifier(place_account).key
+        if place_account_key in smart_account_name_to_code:
+            return smart_account_name_to_code[place_account_key]
+    return place_account
 
 
 def find_raw_column(raw_df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
@@ -139,6 +171,24 @@ def find_raw_column(raw_df: pd.DataFrame, candidates: list[str]) -> Optional[str
             if raw_column_matches_candidate(column, candidate):
                 return column
     return None
+
+
+def find_raw_column_smart(raw_df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    candidate_keys = {
+        normalize_identifier(candidate).key
+        for candidate in candidates
+        if normalize_identifier(candidate).key
+    }
+    matches = []
+    for column in raw_df.columns:
+        if normalize_identifier(column).key in candidate_keys:
+            matches.append(column)
+    if len(matches) > 1:
+        raise ValueError(
+            "Smart matching collision: multiple raw columns match the same canonical candidate: "
+            + ", ".join(str(match) for match in matches)
+        )
+    return matches[0] if matches else None
 
 
 def normalize_header(value: object) -> str:
@@ -245,6 +295,8 @@ def read_raw_submissions(
     month: str,
     account_name_to_code: dict[str, str],
     allow_month_mismatch: bool = False,
+    account_aliases: Optional[dict[str, str]] = None,
+    country_aliases: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
     raw_sheet = find_raw_submission_sheet(raw_file)
     raw_df = pd.read_excel(raw_file, sheet_name=raw_sheet)
@@ -258,12 +310,18 @@ def read_raw_submissions(
     raw_df["Month Clean"] = month
     raw_df["Country Clean"] = raw_df["Country"] if "Country" in raw_df.columns else "AU"
     raw_df["Country Clean"] = raw_df["Country Clean"].fillna("AU")
+    if country_aliases:
+        country_lookup = normalized_lookup(country_aliases)
+        raw_df["Country Clean"] = raw_df["Country Clean"].apply(
+            lambda value: country_lookup.get(normalize_identifier(value).key, value)
+        )
     raw_df["Account Name Clean"] = (
         raw_df["Account Name"] if "Account Name" in raw_df.columns else ""
     )
     raw_df["Account Raw"] = raw_df["Account"] if "Account" in raw_df.columns else ""
+    smart_account_lookup = normalized_lookup(account_aliases or {})
     raw_df["Account Clean"] = raw_df.apply(
-        lambda row: get_account_code(row, account_name_to_code), axis=1
+        lambda row: get_account_code(row, account_name_to_code, smart_account_lookup), axis=1
     )
 
     return raw_df
@@ -272,6 +330,7 @@ def read_raw_submissions(
 def make_display_long(
     raw_df: pd.DataFrame,
     sku_specs: list[dict[str, object]],
+    smart_matching: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_parts = []
     quality_rows = []
@@ -299,7 +358,11 @@ def make_display_long(
         sku = spec.get("sku")
         if sku:
             raw_column_candidates.append(sku)
-        raw_column = find_raw_column(raw_df, raw_column_candidates)
+        raw_column = (
+            find_raw_column_smart(raw_df, raw_column_candidates)
+            if smart_matching
+            else find_raw_column(raw_df, raw_column_candidates)
+        )
 
         if raw_column is None:
             quality_rows.append(
@@ -508,6 +571,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow raw submission dates to differ from --month.",
     )
+    parser.add_argument(
+        "--enable-smart-matching",
+        action="store_true",
+        help="Enable beta identifier matching. Default off keeps the v1.0 path.",
+    )
+    parser.add_argument(
+        "--identifier-alias-map",
+        default="",
+        help="Per-session JSON alias decisions for beta smart identifier matching.",
+    )
     return parser.parse_args()
 
 
@@ -516,6 +589,12 @@ def main() -> None:
     raw_file = Path(args.raw_file)
     output_dir = Path(args.output_dir) / args.month
     master_db = Path(args.master_db)
+
+    alias_decisions = (
+        load_alias_decisions(Path(args.identifier_alias_map))
+        if args.enable_smart_matching and args.identifier_alias_map
+        else []
+    )
 
     if args.disable_master_data:
         sku_specs = SKU_SPECS
@@ -529,13 +608,27 @@ def main() -> None:
             sku_specs = SKU_SPECS
             account_name_to_code = ACCOUNT_NAME_TO_CODE
 
+    if args.enable_smart_matching:
+        sku_specs = apply_sku_decisions_to_specs(sku_specs, alias_decisions)
+        account_aliases = account_decision_map(alias_decisions)
+        country_aliases = country_decision_map(alias_decisions)
+    else:
+        account_aliases = {}
+        country_aliases = {}
+
     raw_df = read_raw_submissions(
         raw_file,
         args.month,
         account_name_to_code,
         allow_month_mismatch=args.allow_month_mismatch,
+        account_aliases=account_aliases,
+        country_aliases=country_aliases,
     )
-    display_long, data_quality = make_display_long(raw_df, sku_specs)
+    display_long, data_quality = make_display_long(
+        raw_df,
+        sku_specs,
+        smart_matching=args.enable_smart_matching,
+    )
     csv_output, quality_output, db_output = save_outputs(
         raw_df, display_long, data_quality, output_dir
     )
