@@ -19,18 +19,17 @@ from identifier_matching import (
     clean_text,
     display_like_columns,
     items_to_frame,
-    load_alias_decisions,
     normalize_identifier,
-    save_alias_decisions,
     summarize_items,
 )
+from alias_workbook import create_alias_decisions_workbook, load_alias_decisions_from_workbook
 
 TOOL_DIR = Path(__file__).parent
 RUNTIME_DIR = TOOL_DIR / ".runtime"
 UPLOAD_DIR = RUNTIME_DIR / "uploads"
 OUTPUT_ROOT = RUNTIME_DIR / "outputs"
 APP_TITLE = "Retail On-shelf Rate Calculator Online by CodeNATHAN"
-APP_VERSION = "v1.1-beta"
+APP_VERSION = "v1.2-beta"
 
 RANGE_SHEET_PREFERENCES = ["Master data", "Key SKU Display% (2)", "Key SKU Display%"]
 TEMPLATE_SHEET_PREFERENCES = ["ANZ On-Shelf Retailer", "ANZ On-Shelf Retailer (2)", "数据不含公式版"]
@@ -271,8 +270,7 @@ def month_select_index(value: str, fallback: str) -> int:
 
 
 def render_app_title() -> None:
-    st.markdown(
-        """
+    html = """
         <style>
           .app-title {
             margin: 0.25rem 0 1.5rem;
@@ -313,8 +311,10 @@ def render_app_title() -> None:
           }
         </style>
         <div class="app-title">Retail On-shelf Rate Calculator Online by <span class="code-nathan">CodeNATHAN</span></div>
-        <div class="app-version">v1.1-beta</div>
-        """,
+        <div class="app-version">APP_VERSION_PLACEHOLDER</div>
+        """.replace("APP_VERSION_PLACEHOLDER", APP_VERSION)
+    st.markdown(
+        html,
         unsafe_allow_html=True,
     )
 
@@ -476,6 +476,25 @@ def decision_key(domain: str, raw_value: object) -> str:
 def alias_decision_signature(decisions: list[dict[str, object]]) -> str:
     payload = json.dumps(decisions, ensure_ascii=False, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def template_alias_signature(path: Optional[Path]) -> str:
+    signature = file_signature(path)
+    return json.dumps(signature, ensure_ascii=False, sort_keys=True) if signature else ""
+
+
+def load_template_alias_decisions(path: Optional[Path]) -> None:
+    signature = template_alias_signature(path)
+    if not signature or st.session_state.get("_last_template_alias_source") == signature:
+        return
+    try:
+        decisions = load_alias_decisions_from_workbook(path)
+    except Exception as error:
+        st.warning(f"Could not load embedded alias map from template: {error}")
+        decisions = []
+    st.session_state["identifier_alias_decisions"] = decisions
+    st.session_state["_last_template_alias_source"] = signature
+    st.session_state["_template_alias_decision_count"] = len(decisions)
 
 
 def read_sheet_safe(path: Optional[Path], sheet: str) -> pd.DataFrame:
@@ -881,39 +900,9 @@ def main() -> None:
             ),
         )
         st.caption(
-            "Beta matching and the alias map below are one feature. Turn matching on, resolve any "
-            "flagged values, then Export the alias map to reuse those decisions next month — Import it "
-            "to skip re-resolving (the online app does not store them permanently)."
+            "Beta matching stores confirmed alias decisions inside the generated report workbook. "
+            "Upload last month's report as this month's template to reuse them."
         )
-        alias_import_file = st.file_uploader(
-            "Import Beta Alias Map",
-            type=["json"],
-            help="Load alias decisions you exported in a previous session. Pairs with 'Export Beta Alias Map'.",
-        )
-        if alias_import_file is not None:
-            alias_signature = f"{alias_import_file.name}:{alias_import_file.size}"
-            if st.session_state.get("_last_alias_import") != alias_signature:
-                try:
-                    payload = json.loads(alias_import_file.getvalue().decode("utf-8"))
-                    st.session_state["identifier_alias_decisions"] = (
-                        payload.get("decisions", payload) if isinstance(payload, dict) else payload
-                    )
-                    st.session_state["_last_alias_import"] = alias_signature
-                    st.success("Beta alias map imported for this session.")
-                except Exception as error:
-                    st.error(f"Could not import alias map: {error}")
-        if st.session_state.get("identifier_alias_decisions"):
-            export_payload = {
-                "version": 1,
-                "decisions": st.session_state["identifier_alias_decisions"],
-            }
-            st.download_button(
-                "Export Beta Alias Map",
-                data=json.dumps(export_payload, ensure_ascii=False, indent=2).encode("utf-8"),
-                file_name="identifier_alias_map.json",
-                mime="application/json",
-                on_click="ignore",
-            )
 
         if raw_file is not None:
             inferred_month, inferred_label = infer_month_from_filename(raw_file.name)
@@ -931,6 +920,7 @@ def main() -> None:
     raw_path = save_upload(raw_file, session_upload_dir) if raw_file else None
     range_path = save_upload(range_file, session_upload_dir) if range_file else None
     template_path = save_upload(template_file, session_upload_dir) if template_file else None
+    load_template_alias_decisions(template_path)
 
     range_sheets = xlsx_sheets(range_path)
     template_sheets = xlsx_sheets(template_path)
@@ -996,7 +986,7 @@ def main() -> None:
             index=month_select_index(previous_state_label, default_compare),
         )
         st.session_state["previous_month_label"] = previous_month_label
-        keep_history_columns = st.checkbox("Keep history columns", value=False)
+        keep_history_columns = False
         st.button("Clear Session Files", on_click=clear_session_files)
 
     validation_errors = []
@@ -1091,7 +1081,8 @@ def main() -> None:
         run_output_root = OUTPUT_ROOT / st.session_state["session_id"] / run_id
         history_db = run_output_root / "retail_on_shelf_history.duckdb"
         identifier_quality_csv = run_output_root / month / f"identifier_quality_{month}.csv"
-        alias_map_path = run_output_root / "identifier_alias_map.json"
+        alias_workbook_for_run = template_path
+        alias_decisions_for_run: list[dict[str, object]] = []
         if smart_matching_enabled:
             run_output_root.mkdir(parents=True, exist_ok=True)
             (run_output_root / month).mkdir(parents=True, exist_ok=True)
@@ -1100,7 +1091,10 @@ def main() -> None:
                 auto_decisions_from_quality(identifier_quality_frame),
                 beta_alias_decisions,
             )
-            save_alias_decisions(alias_map_path, alias_decisions_for_run)
+            alias_workbook_for_run = create_alias_decisions_workbook(
+                target=run_output_root / "identifier_alias_workbook.xlsx",
+                decisions=alias_decisions_for_run,
+            )
         command = [
             sys.executable,
             str(TOOL_DIR / "run_monthly_report.py"),
@@ -1130,8 +1124,8 @@ def main() -> None:
             command.extend(
                 [
                     "--enable-smart-matching",
-                    "--identifier-alias-map",
-                    str(alias_map_path),
+                    "--identifier-alias-workbook",
+                    str(alias_workbook_for_run),
                 ]
             )
         if keep_history_columns:

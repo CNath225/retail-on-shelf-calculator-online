@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 
 from step4_generate_report_preview import (
     apply_report_preview_formatting,
+    clean_report_columns,
     style_report_preview,
     write_ttl_average_formulas,
 )
@@ -68,6 +69,38 @@ class ReportFormattingTests(unittest.TestCase):
         self.assertIn("#0070C0", rendered)
         self.assertIn("#C6EFCE", rendered)  # JUN 1.0 -> green
         self.assertIn("#FFC7CE", rendered)  # JUN 0.24 / 0.20 -> red
+
+    def test_clean_report_columns_keeps_only_rolling_month_pair(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Country": "AU",
+                    "Category": "Robot",
+                    "Channel": "JB",
+                    "SKU": "X60 Ultra",
+                    "APR": 0.1,
+                    "MAY": 0.2,
+                    "JUN": 0.3,
+                    "JUL": 0.4,
+                    "Trend": "▲",
+                    "New": "",
+                    "Note": "",
+                }
+            ]
+        )
+
+        cleaned = clean_report_columns(
+            output_df=frame,
+            month_label="JUL",
+            previous_month_label="JUN",
+            trend_column="Trend",
+            keep_history_columns=False,
+        )
+
+        self.assertEqual(
+            list(cleaned.columns),
+            ["Country", "Category", "Channel", "SKU", "JUN", "JUL", "Trend", "New", "Note"],
+        )
 
 
 if __name__ == "__main__":

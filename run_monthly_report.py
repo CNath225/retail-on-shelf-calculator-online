@@ -157,7 +157,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--identifier-alias-map",
         default="",
-        help="Per-session JSON alias decisions for beta smart identifier matching.",
+        help="Deprecated. Per-session JSON alias decisions for beta smart identifier matching.",
+    )
+    parser.add_argument(
+        "--identifier-alias-workbook",
+        default="",
+        help="Workbook containing an embedded hidden-sheet alias map.",
     )
     return parser.parse_args()
 
@@ -193,6 +198,8 @@ def main() -> None:
         step1_command.append("--allow-month-mismatch")
     if args.enable_smart_matching:
         step1_command.append("--enable-smart-matching")
+        if args.identifier_alias_workbook:
+            step1_command.extend(["--identifier-alias-workbook", args.identifier_alias_workbook])
         if args.identifier_alias_map:
             step1_command.extend(["--identifier-alias-map", args.identifier_alias_map])
     run_step(step1_command)
@@ -239,6 +246,8 @@ def main() -> None:
     ]
     if args.keep_history_columns:
         step4_command.append("--keep-history-columns")
+    if args.identifier_alias_workbook:
+        step4_command.extend(["--identifier-alias-workbook", args.identifier_alias_workbook])
     run_step(step4_command)
 
     run_step(

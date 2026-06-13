@@ -7,6 +7,8 @@ import re
 import pandas as pd
 from xlsxwriter.utility import xl_col_to_name
 
+from alias_workbook import load_alias_decisions_from_workbook, write_alias_sheet_xlsxwriter
+
 
 TOOL_DIR = Path(__file__).parent
 DEFAULT_OUTPUT_ROOT = Path(os.environ.get("ONSHELF_OUTPUT_ROOT", TOOL_DIR / "step1_outputs"))
@@ -524,6 +526,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep all month/history columns from the template in Report Preview.",
     )
+    parser.add_argument(
+        "--identifier-alias-workbook",
+        default="",
+        help="Workbook containing an embedded hidden-sheet alias map to carry into the report.",
+    )
     return parser.parse_args()
 
 
@@ -535,6 +542,8 @@ def main() -> None:
 
     report_df = pd.read_excel(args.template_file, sheet_name=args.template_sheet)
     rates_df = pd.read_csv(step3_file)
+    alias_workbook_path = Path(args.identifier_alias_workbook) if args.identifier_alias_workbook else Path(args.template_file)
+    alias_decisions = load_alias_decisions_from_workbook(alias_workbook_path)
 
     rates_df["report_value"] = rates_df.apply(rate_to_report_value, axis=1)
     for column in ["country", "category", "sku", "account"]:
@@ -634,6 +643,7 @@ def main() -> None:
         key_sku_df.to_excel(writer, sheet_name="Key SKU Display", index=False)
 
         workbook = writer.book
+        write_alias_sheet_xlsxwriter(workbook, alias_decisions)
         percent_format = workbook.add_format({"num_format": "0%"})
         header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAF7"})
         status_format = workbook.add_format({"bg_color": "#FCE4D6"})

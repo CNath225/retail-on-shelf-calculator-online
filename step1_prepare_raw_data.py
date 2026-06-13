@@ -14,6 +14,7 @@ from identifier_matching import (
     load_alias_decisions,
     normalize_identifier,
 )
+from alias_workbook import load_alias_decisions_from_workbook
 from master_data import (
     DEFAULT_MASTER_DB,
     active_account_name_map,
@@ -579,7 +580,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--identifier-alias-map",
         default="",
-        help="Per-session JSON alias decisions for beta smart identifier matching.",
+        help="Deprecated. Per-session JSON alias decisions for beta smart identifier matching.",
+    )
+    parser.add_argument(
+        "--identifier-alias-workbook",
+        default="",
+        help="Workbook containing an embedded hidden-sheet alias map.",
     )
     return parser.parse_args()
 
@@ -590,11 +596,11 @@ def main() -> None:
     output_dir = Path(args.output_dir) / args.month
     master_db = Path(args.master_db)
 
-    alias_decisions = (
-        load_alias_decisions(Path(args.identifier_alias_map))
-        if args.enable_smart_matching and args.identifier_alias_map
-        else []
-    )
+    alias_decisions: list[dict[str, object]] = []
+    if args.enable_smart_matching and args.identifier_alias_workbook:
+        alias_decisions = load_alias_decisions_from_workbook(Path(args.identifier_alias_workbook))
+    elif args.enable_smart_matching and args.identifier_alias_map:
+        alias_decisions = load_alias_decisions(Path(args.identifier_alias_map))
 
     if args.disable_master_data:
         sku_specs = SKU_SPECS
