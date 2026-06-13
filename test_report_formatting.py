@@ -136,8 +136,8 @@ class ReportFormattingTests(unittest.TestCase):
                 red = wb.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
                 cat_text = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True})
                 cat_pct = wb.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
-                ch_text = wb.add_format({"bg_color": "#A6CAEC", "bold": True})
-                ch_pct = wb.add_format({"bg_color": "#A6CAEC", "bold": True, "num_format": "0%"})
+                ch_text = wb.add_format({"bold": True})
+                ch_pct = wb.add_format({"bold": True, "num_format": "0%"})
                 apply_presentation_formatting(
                     writer.sheets["For Presentation"],
                     frame,
@@ -153,7 +153,7 @@ class ReportFormattingTests(unittest.TestCase):
                 )
 
             ws = load_workbook(path, data_only=False)["For Presentation"]
-            self.assertEqual(ws.cell(row=2, column=1).fill.fgColor.rgb, "FFA6CAEC")
+            self.assertIsNone(ws.cell(row=2, column=1).fill.patternType)
             self.assertEqual(ws.cell(row=3, column=1).fill.fgColor.rgb, "FF0070C0")
             self.assertEqual(ws.cell(row=3, column=7).value, None)
             self.assertFalse(str(ws.cell(row=2, column=5).value).startswith("="))

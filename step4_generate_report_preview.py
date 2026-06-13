@@ -570,7 +570,7 @@ def style_report_preview(frame: pd.DataFrame, month_label: str, trend_column: st
     green = "background-color: #C6EFCE; color: #006100"
     red = "background-color: #FFC7CE; color: #9C0006"
     category = "background-color: #0070C0; color: #FFFFFF; font-weight: 700"
-    channel = "background-color: #A6CAEC; color: #1F2328; font-weight: 700"
+    channel = "font-weight: 700"
 
     def style_row(row: pd.Series) -> list[str]:
         styles = ["" for _ in row]
@@ -773,6 +773,7 @@ def main() -> None:
         write_alias_sheet_xlsxwriter(workbook, alias_decisions)
         percent_format = workbook.add_format({"num_format": "0%"})
         header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAF7"})
+        presentation_header_format = workbook.add_format({"bold": True, "bg_color": "#000000", "font_color": "#FFFFFF"})
         status_format = workbook.add_format({"bg_color": "#FCE4D6"})
 
         # Master-workbook colours (Excel standard preset hexes).
@@ -782,6 +783,8 @@ def main() -> None:
         category_pct_format = workbook.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
         channel_text_format = workbook.add_format({"bg_color": "#A6CAEC", "bold": True})
         channel_pct_format = workbook.add_format({"bg_color": "#A6CAEC", "bold": True, "num_format": "0%"})
+        presentation_channel_text_format = workbook.add_format({"bold": True})
+        presentation_channel_pct_format = workbook.add_format({"bold": True, "num_format": "0%"})
 
         for sheet_name, df in {
             "Report Preview": output_df,
@@ -797,7 +800,12 @@ def main() -> None:
                 else:
                     width = min(max(len(str(column_name)) + 2, 12), 28)
                 worksheet.set_column(col_idx, col_idx, width)
-                worksheet.write(0, col_idx, column_name, header_format)
+                active_header_format = (
+                    presentation_header_format
+                    if sheet_name == PRESENTATION_SHEET_NAME
+                    else header_format
+                )
+                worksheet.write(0, col_idx, column_name, active_header_format)
 
         report_sheet = writer.sheets["Report Preview"]
         month_col = output_df.columns.get_loc(month_label)
@@ -848,8 +856,8 @@ def main() -> None:
             red_format=red_value_format,
             category_text_format=category_text_format,
             category_pct_format=category_pct_format,
-            channel_text_format=channel_text_format,
-            channel_pct_format=channel_pct_format,
+            channel_text_format=presentation_channel_text_format,
+            channel_pct_format=presentation_channel_pct_format,
         )
 
         key_sheet = writer.sheets["Key SKU Display"]
