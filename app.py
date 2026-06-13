@@ -269,11 +269,11 @@ def month_select_index(value: str, fallback: str) -> int:
     return ALL_MONTH_LABELS.index(normalized) if normalized in ALL_MONTH_LABELS else 5
 
 
-def render_app_title() -> None:
-    html = """
+def app_title_html() -> str:
+    return """
         <style>
           .app-title {
-            margin: 0.25rem 0 1.5rem;
+            margin: 0.25rem 0 0.7rem;
             font-size: clamp(2.1rem, 4vw, 3.5rem);
             font-weight: 800;
             line-height: 1.08;
@@ -290,7 +290,7 @@ def render_app_title() -> None:
           }
           .app-version {
             display: inline-block;
-            margin: -0.75rem 0 1.25rem;
+            margin: 0;
             padding: 0.16rem 0.52rem;
             border: 1px solid rgba(185, 148, 78, 0.5);
             border-radius: 6px;
@@ -298,6 +298,78 @@ def render_app_title() -> None:
             background: rgba(32, 34, 38, 0.72);
             font-size: 0.82rem;
             letter-spacing: 0;
+          }
+          .version-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.42rem;
+            margin: 0 0 1.25rem;
+          }
+          .patch-notes {
+            position: relative;
+            display: inline-block;
+            font-size: 0.82rem;
+            line-height: 1.35;
+            color: #c8a760;
+          }
+          .patch-notes summary {
+            list-style: none;
+            cursor: pointer;
+            user-select: none;
+            padding: 0.16rem 0.58rem;
+            border: 1px solid rgba(185, 148, 78, 0.78);
+            border-radius: 6px;
+            color: #c8a760;
+            background: linear-gradient(180deg, rgba(40, 34, 22, 0.96), rgba(21, 18, 14, 0.96));
+            box-shadow: inset 0 0 0 1px rgba(255, 221, 137, 0.12), 0 0 12px rgba(169, 130, 53, 0.16);
+          }
+          .patch-notes summary::-webkit-details-marker {
+            display: none;
+          }
+          .patch-notes summary::after {
+            content: "▾";
+            margin-left: 0.36rem;
+            color: #f0cf80;
+          }
+          .patch-notes[open] summary {
+            border-bottom-color: rgba(240, 207, 128, 0.95);
+            box-shadow: inset 0 0 0 1px rgba(255, 221, 137, 0.2), 0 0 18px rgba(169, 130, 53, 0.28);
+          }
+          .patch-notes[open] summary::after {
+            content: "▴";
+          }
+          .patch-panel {
+            position: absolute;
+            z-index: 20;
+            top: calc(100% + 0.38rem);
+            left: 0;
+            width: min(30rem, calc(100vw - 2rem));
+            padding: 0.85rem 0.95rem;
+            border: 1px solid rgba(200, 167, 96, 0.7);
+            border-radius: 8px;
+            color: #efe5cc;
+            background: linear-gradient(180deg, rgba(25, 25, 28, 0.98), rgba(12, 12, 14, 0.98));
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+          }
+          .patch-version {
+            margin: 0 0 0.72rem;
+            padding-left: 0.65rem;
+            border-left: 2px solid rgba(200, 167, 96, 0.78);
+          }
+          .patch-version:last-child {
+            margin-bottom: 0;
+          }
+          .patch-version strong {
+            display: block;
+            margin-bottom: 0.22rem;
+            color: #f0cf80;
+          }
+          .patch-version ul {
+            margin: 0;
+            padding-left: 1rem;
+          }
+          .patch-version li {
+            margin: 0.12rem 0;
           }
           @keyframes codeJump {
             0%, 100% { transform: translateY(0); filter: brightness(1); }
@@ -311,8 +383,48 @@ def render_app_title() -> None:
           }
         </style>
         <div class="app-title">Retail On-shelf Rate Calculator Online by <span class="code-nathan">CodeNATHAN</span></div>
-        <div class="app-version">APP_VERSION_PLACEHOLDER</div>
+        <div class="version-row">
+          <div class="app-version">APP_VERSION_PLACEHOLDER</div>
+          <details class="patch-notes">
+            <summary>Patch notes</summary>
+            <div class="patch-panel">
+              <div class="patch-version">
+                <strong>v1-beta</strong>
+                <ul>
+                  <li>Online upload flow for raw export, range table, and report template.</li>
+                  <li>Raw sheet detection, missing ID handling, month checks, and stale-result hiding.</li>
+                </ul>
+              </div>
+              <div class="patch-version">
+                <strong>v1.1-beta</strong>
+                <ul>
+                  <li>Smart identifier matching beta, default off.</li>
+                  <li>Category-TTL fix includes single-SKU channels; W&amp;D matches 53%.</li>
+                  <li>Report colour formatting and theme-adaptive title polish.</li>
+                </ul>
+              </div>
+              <div class="patch-version">
+                <strong>v1.2-beta</strong>
+                <ul>
+                  <li>Alias map is embedded in a hidden report sheet.</li>
+                  <li>Generated reports now work as rolling templates with previous + current month columns.</li>
+                  <li>Added this changelog dropdown.</li>
+                </ul>
+              </div>
+              <div class="patch-version">
+                <strong>future</strong>
+                <ul>
+                  <li>Reserved for upcoming approved changes.</li>
+                </ul>
+              </div>
+            </div>
+          </details>
+        </div>
         """.replace("APP_VERSION_PLACEHOLDER", APP_VERSION)
+
+
+def render_app_title() -> None:
+    html = app_title_html()
     st.markdown(
         html,
         unsafe_allow_html=True,
