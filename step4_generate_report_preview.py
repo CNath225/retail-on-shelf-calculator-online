@@ -338,6 +338,8 @@ def write_ttl_average_formulas(
     frame: pd.DataFrame,
     value_columns: list[str],
     percent_format,
+    category_pct_format=None,
+    channel_pct_format=None,
 ) -> int:
     formula_count = 0
     ttl_positions = [
@@ -350,6 +352,16 @@ def write_ttl_average_formulas(
         child_groups = ttl_child_groups(frame, ttl_position)
         if not child_groups:
             continue
+
+        # Subtotal rows are shaded like the master: category TTL (blank channel) gets
+        # the strong fill, channel/account TTL gets the lighter fill.
+        is_category_ttl = is_blank(frame.at[ttl_position, "Channel"])
+        if is_category_ttl and category_pct_format is not None:
+            row_format = category_pct_format
+        elif not is_category_ttl and channel_pct_format is not None:
+            row_format = channel_pct_format
+        else:
+            row_format = percent_format
 
         for value_column in value_columns:
             if value_column not in frame.columns:
@@ -366,12 +378,122 @@ def write_ttl_average_formulas(
                 ttl_position + 1,
                 column_index,
                 formula,
-                percent_format,
+                row_format,
                 cached_value,
             )
             formula_count += 1
 
     return formula_count
+
+
+def apply_report_preview_formatting(
+    worksheet,
+    frame: pd.DataFrame,
+    month_label: str,
+    previous_month_label: str,
+    trend_column: str,
+    green_format,
+    red_format,
+    category_text_format,
+    channel_text_format,
+) -> None:
+    """Replicate the master workbook colours on the Report Preview sheet.
+
+    - Current-month rate column (detail rows only): >90% green, <60% red, strict;
+      green is suppressed when the row trend is down. Text/blank cells are untouched.
+    - Trend column (detail rows only): a down arrow is red.
+    - Subtotal (TTL) rows are shaded instead: category TTL strong fill, channel TTL lighter fill.
+    """
+    row_count = len(frame)
+    if row_count == 0 or "SKU" not in frame.columns:
+        return
+
+    columns = list(frame.columns)
+    sku_letter = xl_col_to_name(columns.index("SKU"))
+    last_row = row_count + 1  # 1-based; header occupies row 1
+    not_ttl = f'UPPER(TRIM(${sku_letter}2))<>"TTL"'
+
+    if month_label in columns:
+        month_letter = xl_col_to_name(columns.index(month_label))
+        month_range = f"{month_letter}2:{month_letter}{last_row}"
+        cell = f"${month_letter}2"
+        worksheet.conditional_format(
+            month_range,
+            {
+                "type": "formula",
+                "criteria": f"=AND(ISNUMBER({cell}),{cell}<0.6,{not_ttl})",
+                "format": red_format,
+            },
+        )
+        trend_clause = ""
+        if trend_column in columns:
+            trend_letter = xl_col_to_name(columns.index(trend_column))
+            trend_clause = f',${trend_letter}2<>"▼"'
+        worksheet.conditional_format(
+            month_range,
+            {
+                "type": "formula",
+                "criteria": f"=AND(ISNUMBER({cell}),{cell}>0.9,{not_ttl}{trend_clause})",
+                "format": green_format,
+            },
+        )
+
+    if trend_column in columns:
+        trend_letter = xl_col_to_name(columns.index(trend_column))
+        trend_range = f"{trend_letter}2:{trend_letter}{last_row}"
+        worksheet.conditional_format(
+            trend_range,
+            {
+                "type": "formula",
+                "criteria": f'=AND(${trend_letter}2="▼",{not_ttl})',
+                "format": red_format,
+            },
+        )
+
+    formula_columns = {
+        column for column in [previous_month_label, month_label] if column in columns
+    }
+    channel_index = columns.index("Channel") if "Channel" in columns else None
+    sku_index = columns.index("SKU")
+    for position in range(row_count):
+        if normalize_key(frame.iat[position, sku_index]) != "TTL":
+            continue
+        channel_blank = channel_index is None or is_blank(frame.iat[position, channel_index])
+        text_format = category_text_format if channel_blank else channel_text_format
+        for col_index, column in enumerate(columns):
+            if column in formula_columns:
+                continue
+            value = frame.iat[position, col_index]
+            if pd.isna(value):
+                value = ""
+            worksheet.write(position + 1, col_index, value, text_format)
+
+
+def style_report_preview(frame: pd.DataFrame, month_label: str, trend_column: str = "Trend"):
+    """Pandas Styler that mirrors the Excel report colours for the web preview."""
+    green = "background-color: #C6EFCE; color: #006100"
+    red = "background-color: #FFC7CE; color: #9C0006"
+    category = "background-color: #0070C0; color: #FFFFFF; font-weight: 700"
+    channel = "background-color: #D6DCE4; color: #1F2328; font-weight: 700"
+
+    def style_row(row: pd.Series) -> list[str]:
+        styles = ["" for _ in row]
+        if normalize_key(row.get("SKU", "")) == "TTL":
+            fill = category if is_blank(row.get("Channel", "")) else channel
+            return [fill for _ in row]
+        position = {column: index for index, column in enumerate(row.index)}
+        if month_label in position and is_number(row[month_label]):
+            number = as_number(row[month_label])
+            trend = str(row.get(trend_column, "")).strip()
+            if number > 0.9 and trend != "▼":
+                styles[position[month_label]] = green
+            elif number < 0.6:
+                styles[position[month_label]] = red
+        if trend_column in position and str(row.get(trend_column, "")).strip() == "▼":
+            styles[position[trend_column]] = red
+        return styles
+
+    return frame.style.apply(style_row, axis=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -516,6 +638,14 @@ def main() -> None:
         header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAF7"})
         status_format = workbook.add_format({"bg_color": "#FCE4D6"})
 
+        # Master-workbook colours (Excel standard preset hexes).
+        green_value_format = workbook.add_format({"bg_color": "#C6EFCE", "font_color": "#006100"})
+        red_value_format = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
+        category_text_format = workbook.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True})
+        category_pct_format = workbook.add_format({"bg_color": "#0070C0", "font_color": "#FFFFFF", "bold": True, "num_format": "0%"})
+        channel_text_format = workbook.add_format({"bg_color": "#D6DCE4", "bold": True})
+        channel_pct_format = workbook.add_format({"bg_color": "#D6DCE4", "bold": True, "num_format": "0%"})
+
         for sheet_name, df in {
             "Report Preview": output_df,
             "Key SKU Display": key_sku_df,
@@ -546,6 +676,20 @@ def main() -> None:
             frame=output_df,
             value_columns=formula_columns,
             percent_format=percent_format,
+            category_pct_format=category_pct_format,
+            channel_pct_format=channel_pct_format,
+        )
+
+        apply_report_preview_formatting(
+            worksheet=report_sheet,
+            frame=output_df,
+            month_label=month_label,
+            previous_month_label=previous_month_label,
+            trend_column=trend_column,
+            green_format=green_value_format,
+            red_format=red_value_format,
+            category_text_format=category_text_format,
+            channel_text_format=channel_text_format,
         )
 
         key_sheet = writer.sheets["Key SKU Display"]

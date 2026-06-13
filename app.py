@@ -279,7 +279,11 @@ def render_app_title() -> None:
             font-size: clamp(2.1rem, 4vw, 3.5rem);
             font-weight: 800;
             line-height: 1.08;
-            color: #f4f5f7;
+            /* follow the active Streamlit theme: dark text on light bg, light text on dark bg */
+            color: var(--text-color, #1f2328);
+          }
+          @media (prefers-color-scheme: dark) {
+            .app-title { color: var(--text-color, #f4f5f7); }
           }
           .code-nathan {
             display: inline-block;
@@ -425,7 +429,18 @@ def render_report(
     detail_tab = rendered_tabs[1]
     count_tab = rendered_tabs[2]
     with preview_tab:
-        st.dataframe(pd.read_excel(final_report, sheet_name="Report Preview"), use_container_width=True, height=520)
+        from step4_generate_report_preview import style_report_preview
+
+        preview_df = pd.read_excel(final_report, sheet_name="Report Preview")
+        month_label = st.session_state.get("month_label", "JUN")
+        try:
+            st.dataframe(
+                style_report_preview(preview_df, month_label),
+                use_container_width=True,
+                height=520,
+            )
+        except Exception:
+            st.dataframe(preview_df, use_container_width=True, height=520)
     with detail_tab:
         if step3_csv.exists():
             st.dataframe(pd.read_csv(step3_csv), use_container_width=True, height=520)
