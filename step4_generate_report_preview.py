@@ -218,7 +218,56 @@ def excel_average_references(column_index: int, row_positions: list[int]) -> str
     return ",".join(ranges)
 
 
-def ttl_child_positions(frame: pd.DataFrame, ttl_position: int) -> list[int]:
+def same_country_category(row: pd.Series, country_key: str, category_key: str) -> bool:
+    return (
+        normalize_key(row.get("Country", "")) == country_key
+        and normalize_key(row.get("Category", "")) == category_key
+    )
+
+
+def category_channel_rep_groups(frame: pd.DataFrame, ttl_position: int) -> list[list[int]]:
+    ttl_row = frame.iloc[ttl_position]
+    ttl_country = normalize_key(ttl_row.get("Country", ""))
+    ttl_category = normalize_key(ttl_row.get("Category", ""))
+
+    channel_order: list[str] = []
+    channel_positions: dict[str, list[int]] = {}
+    for position, row in frame.iterrows():
+        if position == ttl_position or not same_country_category(row, ttl_country, ttl_category):
+            continue
+
+        row_channel = normalize_key(row.get("Channel", ""))
+        if not row_channel:
+            continue
+
+        if row_channel not in channel_positions:
+            channel_order.append(row_channel)
+            channel_positions[row_channel] = []
+        channel_positions[row_channel].append(position)
+
+    groups: list[list[int]] = []
+    for channel in channel_order:
+        positions = channel_positions[channel]
+        channel_ttl_positions = [
+            position
+            for position in positions
+            if normalize_key(frame.at[position, "SKU"]) == "TTL"
+        ]
+        detail_positions = [
+            position
+            for position in positions
+            if normalize_key(frame.at[position, "SKU"]) != "TTL"
+        ]
+
+        if channel_ttl_positions:
+            groups.append([channel_ttl_positions[0]])
+        elif detail_positions:
+            groups.append(detail_positions)
+
+    return groups
+
+
+def ttl_child_groups(frame: pd.DataFrame, ttl_position: int) -> list[list[int]]:
     ttl_row = frame.iloc[ttl_position]
     ttl_country = normalize_key(ttl_row.get("Country", ""))
     ttl_category = normalize_key(ttl_row.get("Category", ""))
@@ -229,9 +278,7 @@ def ttl_child_positions(frame: pd.DataFrame, ttl_position: int) -> list[int]:
         if position == ttl_position:
             continue
 
-        same_country = normalize_key(row.get("Country", "")) == ttl_country
-        same_category = normalize_key(row.get("Category", "")) == ttl_category
-        if not same_country or not same_category:
+        if not same_country_category(row, ttl_country, ttl_category):
             continue
 
         row_sku_is_ttl = normalize_key(row.get("SKU", "")) == "TTL"
@@ -240,11 +287,50 @@ def ttl_child_positions(frame: pd.DataFrame, ttl_position: int) -> list[int]:
         if ttl_channel:
             if row_channel == ttl_channel and not row_sku_is_ttl:
                 positions.append(position)
-        else:
-            if row_channel and row_sku_is_ttl:
-                positions.append(position)
 
-    return positions
+    if ttl_channel:
+        return [positions] if positions else []
+    return category_channel_rep_groups(frame, ttl_position)
+
+
+def ttl_child_positions(frame: pd.DataFrame, ttl_position: int) -> list[int]:
+    return [position for group in ttl_child_groups(frame, ttl_position) for position in group]
+
+
+def excel_average_formula(column_index: int, row_groups: list[list[int]]) -> str:
+    if len(row_groups) == 1:
+        references = excel_average_references(column_index, row_groups[0])
+        return f'=IFERROR(AVERAGE({references}),"")'
+
+    arguments: list[str] = []
+    for group in row_groups:
+        references = excel_average_references(column_index, group)
+        if len(group) == 1:
+            arguments.append(references)
+        else:
+            arguments.append(f'IFERROR(AVERAGE({references}),"")')
+    return f'=IFERROR(AVERAGE({",".join(arguments)}),"")'
+
+
+def average_numeric_positions(frame: pd.DataFrame, value_column: str, positions: list[int]):
+    values = frame.loc[positions, value_column].apply(
+        lambda value: as_number(value) if is_number(value) else pd.NA
+    )
+    numeric_values = values.dropna()
+    if len(numeric_values) == 0:
+        return pd.NA
+    return float(numeric_values.mean())
+
+
+def ttl_average_value(frame: pd.DataFrame, value_column: str, row_groups: list[list[int]]):
+    representative_values = [
+        average_numeric_positions(frame, value_column, group)
+        for group in row_groups
+    ]
+    numeric_values = [value for value in representative_values if pd.notna(value)]
+    if not numeric_values:
+        return ""
+    return float(pd.Series(numeric_values).mean())
 
 
 def write_ttl_average_formulas(
@@ -261,8 +347,8 @@ def write_ttl_average_formulas(
     ]
 
     for ttl_position in ttl_positions:
-        child_positions = ttl_child_positions(frame, ttl_position)
-        if not child_positions:
+        child_groups = ttl_child_groups(frame, ttl_position)
+        if not child_groups:
             continue
 
         for value_column in value_columns:
@@ -270,8 +356,7 @@ def write_ttl_average_formulas(
                 continue
 
             column_index = frame.columns.get_loc(value_column)
-            references = excel_average_references(column_index, child_positions)
-            formula = f'=IFERROR(AVERAGE({references}),"")'
+            formula = excel_average_formula(column_index, child_groups)
             cached_value = frame.at[ttl_position, value_column]
             if is_number(cached_value):
                 cached_value = float(as_number(cached_value))
@@ -373,38 +458,25 @@ def main() -> None:
     # Calculate TTL rows as the average of numeric rows in the same Country + Category + Channel block.
     group_columns = ["Country", "Category", "Channel"]
     for group_key, group in output_df.groupby(group_columns, dropna=False):
+        if group["Channel"].apply(is_blank).all():
+            continue
+
         ttl_index = group[normalize_key_series(group["SKU"]).eq("TTL")].index
         if len(ttl_index) == 0:
             continue
 
-        detail_values = output_df.loc[
-            group.index.difference(ttl_index), month_label
-        ].apply(lambda value: as_number(value) if is_number(value) else pd.NA)
-        numeric_values = detail_values.dropna()
-
-        if len(numeric_values) > 0:
-            output_df.loc[ttl_index, month_label] = float(numeric_values.mean())
-        else:
-            output_df.loc[ttl_index, month_label] = ""
+        for index in ttl_index:
+            child_groups = ttl_child_groups(output_df, index)
+            output_df.at[index, month_label] = ttl_average_value(output_df, month_label, child_groups)
 
     # Calculate category-level TTL rows where Channel is blank.
     category_ttl_mask = (
         output_df["SKU"].apply(normalize_key).eq("TTL")
-        & output_df["Channel"].isna()
+        & output_df["Channel"].apply(is_blank)
     )
     for ttl_index, ttl_row in output_df[category_ttl_mask].iterrows():
-        child_ttl_mask = (
-            output_df["Country"].apply(normalize_key).eq(normalize_key(ttl_row["Country"]))
-            & output_df["Category"].apply(normalize_key).eq(normalize_key(ttl_row["Category"]))
-            & output_df["SKU"].apply(normalize_key).eq("TTL")
-            & output_df["Channel"].notna()
-        )
-        child_values = output_df.loc[child_ttl_mask, month_label].apply(
-            lambda value: as_number(value) if is_number(value) else pd.NA
-        )
-        numeric_child_values = child_values.dropna()
-        if len(numeric_child_values) > 0:
-            output_df.at[ttl_index, month_label] = float(numeric_child_values.mean())
+        child_groups = ttl_child_groups(output_df, ttl_index)
+        output_df.at[ttl_index, month_label] = ttl_average_value(output_df, month_label, child_groups)
 
     trend_column = "Trend" if "Trend" in output_df.columns else f"Trend vs {previous_month_label}"
     output_df[trend_column] = output_df.apply(
